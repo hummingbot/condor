@@ -276,6 +276,98 @@ def test_a_cancelled_stop_does_not_cancel_the_teardown_it_waits_on(
     assert read_status(engine.session_dir)["state"] == LoopState.COMPLETED
 
 
+# ── Review R1: a cancelled /shutdown request must not abandon the winddown ──
+
+
+def test_a_cancelled_shutdown_request_does_not_abandon_the_winddown(
+    tmp_path, monkeypatch, supervisor, runs
+):
+    """uvicorn cancels in-flight requests when its graceful-shutdown timeout
+    expires. The winddown ran inside the request task, so the cancel skipped
+    the rest of it, recorded STOPPED and released ``_shutdown_finished`` --
+    teardown's ``stop_all`` then had nothing to wait for and the process exited
+    mid-close with nobody told."""
+    from condor.web.routes import agents as routes
+
+    engine = _engine(tmp_path, monkeypatch, mode="loop")
+    gate = asyncio.Event()
+    started = asyncio.Event()
+    events: list[str] = []
+
+    async def fake_run_shutdown(eng, reason):
+        events.append("start")
+        started.set()
+        await gate.wait()
+        events.append("done")
+
+    monkeypatch.setattr(shutdown_module, "run_shutdown", fake_run_shutdown)
+    monkeypatch.setattr(routes, "_target_engines", lambda *a, **k: [engine])
+    supervisor.register(engine)
+
+    async def go():
+        request = asyncio.create_task(
+            routes.shutdown_strategy("acme", "scalp", agent_id=None, user=None)
+        )
+        await asyncio.wait_for(started.wait(), timeout=5)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+        # The winddown is still in flight and the run is not recorded as over.
+        assert events == ["start"]
+        assert not engine._shutdown_finished.is_set()
+        assert not engine._shutdown_task.done()
+        assert runs == []
+        assert read_status(engine.session_dir)["state"] != LoopState.STOPPED
+
+        # Process teardown waits for it instead of finding nothing to wait on.
+        teardown = asyncio.create_task(supervisor.stop_all())
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert not teardown.done()
+
+        gate.set()
+        await asyncio.wait_for(teardown, timeout=5)
+
+    asyncio.run(go())
+
+    assert events == ["start", "done"]
+    assert runs == ["shutdown"]
+    assert read_status(engine.session_dir)["state"] == LoopState.STOPPED
+
+
+def test_a_second_shutdown_request_joins_the_winddown_in_flight(
+    tmp_path, monkeypatch, supervisor, runs
+):
+    engine = _engine(tmp_path, monkeypatch, mode="loop")
+    gate = asyncio.Event()
+    events: list[str] = []
+
+    async def fake_run_shutdown(eng, reason):
+        events.append(reason)
+        await gate.wait()
+
+    monkeypatch.setattr(shutdown_module, "run_shutdown", fake_run_shutdown)
+    supervisor.register(engine)
+
+    async def go():
+        first = asyncio.create_task(engine.shutdown("one"))
+        await asyncio.sleep(0)
+        second = asyncio.create_task(engine.shutdown("two"))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert not first.done() and not second.done()
+        gate.set()
+        await asyncio.wait_for(asyncio.gather(first, second), timeout=5)
+
+    asyncio.run(go())
+
+    assert events == ["one"]
+    assert runs == ["shutdown"]
+
+
 # ── AG2-01 (engine half): a journal failure in the error path ──
 
 

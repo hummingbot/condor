@@ -181,6 +181,10 @@ class TickEngine:
     _shutdown_finished: asyncio.Event | None = field(
         default=None, init=False, repr=False
     )
+    # The emergency winddown started from outside the tick task (a manual
+    # /shutdown). Held here, not by the request that asked for it, so the
+    # request going away cannot take the winddown with it.
+    _shutdown_task: asyncio.Task | None = field(default=None, init=False, repr=False)
     _last_tick_at: float = field(default=0.0, init=False)
     # How long the last completed tick took, in seconds ([[FEAT-141]]). The
     # journal has always recorded it per tick; keeping the newest one here is
@@ -764,6 +768,32 @@ class TickEngine:
             finally:
                 # Release any stop() that arrived mid-winddown and is waiting.
                 self._shutdown_finished.set()
+
+    async def shutdown(self, reason: str) -> None:
+        """Run the emergency winddown as an engine-held task and wait for it.
+
+        The way to ask for a winddown from *outside* the tick task (the
+        dashboard and MCP ``/shutdown`` route). The winddown must not live in
+        the caller's task: uvicorn cancels in-flight requests when its graceful
+        shutdown timeout expires, and a ``CancelledError`` landing inside
+        :meth:`_run_shutdown` skipped the rest of the winddown, recorded
+        STOPPED and released ``_shutdown_finished`` -- so process teardown had
+        nothing left to wait for and exited with positions possibly open and
+        nobody told. Held by the engine and awaited through a shield, a
+        cancelled caller stops waiting and the winddown carries on;
+        ``LoopSupervisor.stop_all`` then waits for it through :meth:`stop`.
+
+        Idempotent: a second caller joins the winddown already in flight. An
+        error raised by the winddown reaches every caller that is still waiting.
+        """
+        task = getattr(self, "_shutdown_task", None)
+        if task is None:
+            task = asyncio.create_task(
+                self._run_shutdown(reason),
+                name=f"shutdown:{getattr(self, 'agent_id', '?')}",
+            )
+            self._shutdown_task = task
+        await asyncio.shield(task)
 
     def pause(self) -> None:
         self._paused = True

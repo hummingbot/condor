@@ -40,7 +40,7 @@ class FakeEngine:
     async def stop(self):
         self.calls.append("stop")
 
-    async def _run_shutdown(self, reason: str):
+    async def shutdown(self, reason: str):
         self.calls.append("shutdown")
 
     def pause(self):
@@ -190,7 +190,7 @@ def test_the_broadcast_reaches_every_instance_of_the_strategy(monkeypatch, verb)
 
 
 class _GatedEngine(FakeEngine):
-    """Signals entry to stop/_run_shutdown, then holds until ``release`` is set."""
+    """Signals entry to stop/shutdown, then holds until ``release`` is set."""
 
     def __init__(self, agent_id: str, release: asyncio.Event, fail: bool = False):
         super().__init__(agent_id, OWNER.id)
@@ -209,7 +209,7 @@ class _GatedEngine(FakeEngine):
         await self._hold("stop")
         return True
 
-    async def _run_shutdown(self, reason: str):
+    async def shutdown(self, reason: str):
         await self._hold("shutdown")
 
 

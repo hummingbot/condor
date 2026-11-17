@@ -4375,7 +4375,9 @@ async def shutdown_strategy(
     await _wind_down_all(
         engines,
         "shut down",
-        lambda e: e._run_shutdown(reason="manual emergency stop"),
+        # Engine-held and shielded: this request being cancelled (uvicorn's
+        # graceful-shutdown timeout on a restart) must not cancel the winddown.
+        lambda e: e.shutdown(reason="manual emergency stop"),
     )
     return {"shutdown": True}
 
