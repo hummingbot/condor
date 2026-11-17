@@ -731,7 +731,10 @@ async def manage_servers(
     - "list": List all accessible servers with permissions and active status. Also
       returns the caller's context: active_server, user_role, is_admin, plus the
       active_agent_key (the LLM new agents inherit — never invent one) and the
-      custom_llm_endpoints the user has saved.
+      custom_llm_endpoints the user has saved. active_server is the server THIS
+      SESSION's tools act on, fixed when the session started; when the chat's
+      own default has since moved elsewhere it is reported beside it as
+      chat_default_server and does not apply until a new session.
     - "status": Check if a server is online (optional name, defaults to active server)
 
     Args:

@@ -1,6 +1,6 @@
 {
   "_provenance": {
-    "commit": "72be20e51180c02d183491920d0ce22bcb7512e7",
+    "commit": "277281096bf1c605f4ecad16272ec3504d74735f",
     "mcp": "2.2.0",
     "pydantic-ai": "2.52.0"
   },
@@ -875,7 +875,7 @@
       "outputSchema": null
     },
     "manage_servers": {
-      "description": "Manage Hummingbot API servers \u2014 and answer where you are pointed, as whom.\n\n    Actions:\n    - \"list\": List all accessible servers with permissions and active status. Also\n      returns the caller's context: active_server, user_role, is_admin, plus the\n      active_agent_key (the LLM new agents inherit \u2014 never invent one) and the\n      custom_llm_endpoints the user has saved.\n    - \"status\": Check if a server is online (optional name, defaults to active server)\n\n    Args:\n        action: The action to perform.\n        name: Server name (optional for status)\n\n    Returns:\n        Action-specific result dict.\n    ",
+      "description": "Manage Hummingbot API servers \u2014 and answer where you are pointed, as whom.\n\n    Actions:\n    - \"list\": List all accessible servers with permissions and active status. Also\n      returns the caller's context: active_server, user_role, is_admin, plus the\n      active_agent_key (the LLM new agents inherit \u2014 never invent one) and the\n      custom_llm_endpoints the user has saved. active_server is the server THIS\n      SESSION's tools act on, fixed when the session started; when the chat's\n      own default has since moved elsewhere it is reported beside it as\n      chat_default_server and does not apply until a new session.\n    - \"status\": Check if a server is online (optional name, defaults to active server)\n\n    Args:\n        action: The action to perform.\n        name: Server name (optional for status)\n\n    Returns:\n        Action-specific result dict.\n    ",
       "inputSchema": {
         "properties": {
           "action": {
