@@ -428,7 +428,7 @@ def save_experiment_snapshot(
     )
 
     path = experiments_dir / f"experiment_{experiment_num}.md"
-    path.write_text(content)
+    atomic_write_text(path, content)
     return path
 
 
@@ -764,7 +764,7 @@ class JournalManager:
         )
 
         path = self._snapshots_dir / f"snapshot_{tick}.md"
-        path.write_text(content)
+        atomic_write_text(path, content)
         self._cleanup_old_snapshots()
         return path
 

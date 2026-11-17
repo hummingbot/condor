@@ -41,6 +41,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from condor.fsutil import atomic_write_text
 from condor.runtime.danger import (
     CREATE_EXECUTOR_TOOLS,
     MUTATING_AMM_ACTIONS,
@@ -340,7 +341,9 @@ def _trim(path: Path) -> None:
         fh.writelines(dropped)
     # Only after the archive write landed: a crash between the two leaves the
     # rows duplicated, which is recoverable, rather than gone, which is not.
-    path.write_text("".join(lines[len(lines) - MAX_ACTION_LINES :]), encoding="utf-8")
+    # Atomically: a plain rewrite truncates first, so a crash mid-write would
+    # lose the *kept* rows — the ones the archive does not have.
+    atomic_write_text(path, "".join(lines[len(lines) - MAX_ACTION_LINES :]))
 
 
 def _parse(line: str) -> AgentAction | None:
