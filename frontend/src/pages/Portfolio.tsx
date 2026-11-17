@@ -100,12 +100,15 @@ function KpiCell({
   label,
   mainValue,
   pnl,
+  pnlTitle,
   details,
   currencySymbol,
 }: {
   label: string;
   mainValue: string | number;
   pnl?: number;
+  /** What the figure beside the headline measures, where "PnL" would mislead. */
+  pnlTitle?: string;
   details: string;
   currencySymbol?: string;
 }) {
@@ -116,6 +119,7 @@ function KpiCell({
         <span className="text-2xl font-bold tabular-nums tracking-tight leading-none">{mainValue}</span>
         {pnl !== undefined && pnl !== null && (
           <span className="inline-flex items-center gap-0.5 text-sm tabular-nums font-semibold"
+            title={pnlTitle}
             style={{ color: pnl >= 0 ? "var(--color-green)" : "var(--color-red)" }}>
             {pnl >= 0 ? <ArrowUpRight className="h-3.5 w-3.5" /> : <ArrowDownRight className="h-3.5 w-3.5" />}
             {formatCurrencyPnl(pnl, currencySymbol || "$")}
@@ -188,6 +192,8 @@ function DashboardStrip({
           label="Portfolio"
           mainValue={formatCurrency(convertFromUsd(totalUsd), currencySymbol)}
           pnl={portfolioPnl != null ? convertFromUsd(portfolioPnl) : undefined}
+          // A change in *value*, not a PnL: a deposit moves it as much as a trade.
+          pnlTitle={`Change in portfolio value over ${period}, deposits and withdrawals included`}
           details={`${totalTokens} assets · ${connectorCount} connector${connectorCount !== 1 ? "s" : ""}`}
           currencySymbol={currencySymbol}
         />
@@ -1017,11 +1023,15 @@ export function Portfolio() {
   const totalUsd = data?.total_usd ?? 0;
   const connectors = data?.connectors ?? [];
 
-  // Compute portfolio PnL from history (follows period selector)
+  // The period's change in value (follows the period selector): the *live*
+  // total against where the period started. Measured between the history's own
+  // two ends it lagged the headline beside it by up to a sampling interval plus
+  // a 60 s refetch — the total said one thing and its arrow another (FP-15).
+  // Not while the total on screen is still the previous server's.
   const historyPoints = periodHistory?.points ?? [];
   const portfolioPnl =
-    historyPoints.length >= 2
-      ? historyPoints[historyPoints.length - 1].total_usd - historyPoints[0].total_usd
+    data && !isPlaceholderData && historyPoints.length >= 1
+      ? totalUsd - historyPoints[0].total_usd
       : null;
 
   // Compute aggregate stats

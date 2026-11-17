@@ -171,3 +171,29 @@ describe("Portfolio history chart", () => {
     expect(container.querySelector('[data-chart-state="error"]')).toBeNull();
   });
 });
+
+/**
+ * The arrow beside the total is "now − start of period" (FP-15).
+ *
+ * It was the last history point minus the first, so a total of 120 beside a
+ * history that ends at 110 showed +10: the headline live, its delta a sampling
+ * interval behind it.
+ */
+describe("Portfolio period change", () => {
+  it("measures the live total against the period's first point", async () => {
+    // Defaults: live total 120, history [100, 110].
+    await render();
+
+    expect(tile("Portfolio")).toContain("+$20.00");
+    expect(tile("Portfolio")).not.toContain("+$10.00");
+    expect(container.querySelector('[title^="Change in portfolio value over 1W"]')).not.toBeNull();
+  });
+
+  it("shows no change at all when the period has no history to measure from", async () => {
+    calls.getPortfolioHistory.mockResolvedValue(history());
+    await render();
+
+    expect(tile("Portfolio")).not.toContain("+$");
+    expect(tile("Portfolio")).not.toContain("-$");
+  });
+});
