@@ -9,15 +9,139 @@ import { collectCursorPages, type WalkOutcome } from "@/lib/history-pagination";
 
 import { authFetch, authHeaders } from "./auth-token";
 
-async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+/**
+ * What to do when a request made with the stored token comes back 401.
+ *
+ * Resolves `true` when the session was renewed and the request is worth one
+ * more attempt (local mode claims a fresh session), `false` otherwise — the
+ * handler has then either ended the session or decided the 401 was not about
+ * it. Registered by `useAuthState` (lib/auth.ts); nothing is registered in
+ * tests or before the app mounts, and a 401 is then simply thrown.
+ */
+type UnauthorizedHandler = () => Promise<boolean> | boolean;
+
+let unauthorizedHandler: UnauthorizedHandler | null = null;
+let unauthorizedInFlight: Promise<boolean> | null = null;
+
+/** Register the 401 handler. Returns the unregister function. */
+export function setOnUnauthorized(handler: UnauthorizedHandler): () => void {
+  unauthorizedHandler = handler;
+  return () => {
+    if (unauthorizedHandler === handler) unauthorizedHandler = null;
+  };
+}
+
+/**
+ * Run the 401 handler, once for however many callers report at the same time:
+ * an expired session fails every poll on the page in the same tick, and each
+ * of them must not log out (or re-login) on its own (FD-01).
+ */
+export function reportUnauthorized(): Promise<boolean> {
+  const handler = unauthorizedHandler;
+  if (!handler) return Promise.resolve(false);
+  if (!unauthorizedInFlight) {
+    unauthorizedInFlight = Promise.resolve()
+      .then(handler)
+      .catch(() => false)
+      .finally(() => {
+        unauthorizedInFlight = null;
+      });
+  }
+  return unauthorizedInFlight;
+}
+
+/** The login routes answer 401 for a bad login, not for a dead session. */
+const AUTH_ROUTE_PREFIX = "/api/v1/auth/";
+
+/**
+ * How long a request may take before it is abandoned (FD-05).
+ *
+ * `fetch` has no timeout of its own, so a hung upstream used to leave a query
+ * fetching — and holding one of the browser's six connections to the host —
+ * for as long as the socket stayed up. Reads are cut at 30 s: nothing on a
+ * page is still worth waiting for after that, and the query layer retries.
+ *
+ * Writes get a ceiling rather than a deadline. Abandoning a request does not
+ * undo it on the server, and several of them are legitimately slow (an image
+ * pull, a deploy), so the limit only exists to end a spinner that would
+ * otherwise never stop. A call that knows better passes `timeoutMs`.
+ */
+const READ_TIMEOUT_MS = 30_000;
+const WRITE_TIMEOUT_MS = 600_000;
+
+/** `RequestInit`, plus a per-call override of the default timeout. */
+type ApiInit = RequestInit & { timeoutMs?: number };
+
+/**
+ * An abort signal that fires when `ms` elapse or the caller's own signal does.
+ *
+ * Hand-rolled instead of `AbortSignal.any([signal, AbortSignal.timeout(ms)])`:
+ * `AbortSignal.any` is missing from browsers older than early 2024, and a
+ * plain timer is the same few lines with nothing to feature-detect.
+ */
+function requestDeadline(outer: AbortSignal | null | undefined, ms: number) {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, ms);
+  const onAbort = () => controller.abort(outer?.reason);
+  if (outer?.aborted) onAbort();
+  else outer?.addEventListener("abort", onAbort, { once: true });
+  return {
+    signal: controller.signal,
+    timedOut: () => timedOut,
+    clear: () => {
+      clearTimeout(timer);
+      outer?.removeEventListener("abort", onAbort);
+    },
+  };
+}
+
+async function apiFetch<T>(path: string, init?: ApiInit, retried = false): Promise<T> {
+  const { timeoutMs, ...request } = init ?? {};
+  const auth = authHeaders();
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    ...authHeaders(),
-    ...(init?.headers as Record<string, string>),
+    ...auth,
+    ...(request.headers as Record<string, string>),
   };
-  const res = await fetch(path, { ...init, headers });
+  const isRead = (request.method ?? "GET").toUpperCase() === "GET";
+  const ms = timeoutMs ?? (isRead ? READ_TIMEOUT_MS : WRITE_TIMEOUT_MS);
+  const deadline = requestDeadline(request.signal, ms);
+  let res: Response;
+  let body: unknown;
+  try {
+    res = await fetch(path, { ...request, headers, signal: deadline.signal });
+    // Read inside the deadline: a response whose body never finishes hangs
+    // just as a request that is never answered does.
+    body = res.ok ? await res.json() : await res.json().catch(() => ({}));
+  } catch (error) {
+    if (!deadline.timedOut()) throw error;
+    throw Object.assign(
+      new Error(
+        isRead
+          ? `Request timed out after ${Math.round(ms / 1000)}s`
+          : `No answer after ${Math.round(ms / 1000)}s. The request may still have been applied — check before retrying.`,
+      ),
+      { name: "TimeoutError" },
+    );
+  } finally {
+    deadline.clear();
+  }
+  if (res.status === 401 && !retried && auth.Authorization && !path.startsWith(AUTH_ROUTE_PREFIX)) {
+    // A token that changed while this request was in flight means another
+    // request already went through the handler: retry on the new session
+    // rather than report again, or give up if the session is gone.
+    const current = authHeaders().Authorization;
+    const renewed = current !== auth.Authorization ? !!current : await reportUnauthorized();
+    // A 401 never ran the handler behind it, so repeating the request — a
+    // mutation included — cannot apply it twice.
+    if (renewed) return apiFetch<T>(path, init, true);
+  }
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
+    const err = body as { detail?: string };
     // The status rides along on the Error so a caller can tell apart failures that
     // read the same as a message but call for different things from the operator —
     // a 501 from the API-settings routes means "this server is older than this
@@ -30,7 +154,7 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
       body: err,
     });
   }
-  return res.json();
+  return body as T;
 }
 
 /** The HTTP status of a failed `apiFetch`, when the thrown value carries one. */

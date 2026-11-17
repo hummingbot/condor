@@ -18,6 +18,7 @@ import {
 } from "@/lib/formatters";
 import { stopKeepCopy } from "@/lib/executorStopCopy";
 import { executorsQuery } from "@/lib/queryClient";
+import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import { TRADE_BOTTOM_PANE_KEY } from "@/lib/sessionState";
 
 interface TradeBottomPaneProps {
@@ -286,13 +287,18 @@ export function TradeBottomPane({
       setStoppingIds((prev) => new Set([...prev, id]));
       return api.stopExecutor(server!, id, keep);
     },
+    // Close only once the stop is confirmed: a rejected request used to close
+    // the dialog exactly as a success did, leaving the executor trading with no
+    // trace of the failure (FU-01). On error the dialog stays up and shows it.
+    onSuccess: (_data, { id }) => {
+      setConfirmStopId((cur) => (cur === id ? null : cur));
+    },
     onSettled: (_data, _error, { id }) => {
       setStoppingIds((prev) => {
         const next = new Set(prev);
         next.delete(id);
         return next;
       });
-      setConfirmStopId(null);
       // The prefix covers every filtered executors view — the pair-filtered
       // trade panel, its altPair twin, and the unfiltered portfolio list.
       queryClient.invalidateQueries({ queryKey: executorsQuery(server).prefix });
@@ -312,6 +318,9 @@ export function TradeBottomPane({
         pos.controller_id || undefined,
       );
     },
+    onSuccess: (_data, pos) => {
+      setConfirmClearPos((cur) => (cur === pos ? null : cur));
+    },
     onSettled: (_data, _error, pos) => {
       const key = `${pos.connector_name}:${pos.trading_pair}:${pos.position_side}`;
       setClearingPositions((prev) => {
@@ -319,15 +328,24 @@ export function TradeBottomPane({
         next.delete(key);
         return next;
       });
-      setConfirmClearPos(null);
       queryClient.invalidateQueries({ queryKey: ["consolidated-positions", server] });
     },
   });
 
+  const { reset: resetStop } = stopMutation;
+  const { reset: resetClear } = clearPositionMutation;
+
   const handleStop = useCallback((id: string) => {
     setKeepPosition(false);
+    // A previous attempt's error belongs to that attempt, not to this dialog.
+    resetStop();
     setConfirmStopId(id);
-  }, []);
+  }, [resetStop]);
+
+  const handleClearPosition = useCallback((pos: ConsolidatedPosition) => {
+    resetClear();
+    setConfirmClearPos(pos);
+  }, [resetClear]);
 
   const handleRowClick = useCallback(
     (ex: ExecutorInfo) => {
@@ -357,10 +375,13 @@ export function TradeBottomPane({
   // Currency conversion for the current pair's quote asset
   const quoteCurrency = pair.split("-")[1] || "USDT";
   const quoteCurrencies = useMemo(() => [quoteCurrency], [quoteCurrency]);
-  const { formatPnlValue, formatValue } = useRates(quoteCurrencies);
+  const { formatPnlValue, formatValue, formatValueDetailed } = useRates(quoteCurrencies);
 
   const fmtPnl = (val: number) => formatPnlValue(val, quoteCurrency);
   const fmtVol = (val: number) => formatValue(val, quoteCurrency);
+  // Notional and fees are quote-denominated like the PnL beside them, so they
+  // take the same rate-aware path instead of a literal `$` (FU-12).
+  const fmtAmt = (val: number) => formatValueDetailed(val, quoteCurrency);
 
   const activeExecutors = executors.filter((e) => isExecutorActive(e.status));
   const totalPnl = executors.reduce((sum, e) => sum + (e.pnl || 0), 0);
@@ -650,7 +671,7 @@ export function TradeBottomPane({
                             <div className="text-[11px]">
                               <span className="text-[var(--color-text)]">{Math.abs(pos.amount).toFixed(4)}</span>
                               <span className="ml-1 text-[var(--color-text-muted)]">
-                                (${(pos.notional_value ?? Math.abs(pos.amount) * pos.entry_price).toFixed(2)})
+                                ({fmtAmt(pos.notional_value ?? Math.abs(pos.amount) * pos.entry_price)})
                               </span>
                               <span className="ml-1.5 text-[var(--color-text-muted)]">@ {formatPriceSig(pos.entry_price)}</span>
                             </div>
@@ -668,7 +689,7 @@ export function TradeBottomPane({
                               {fmtPnl(pos.unrealized_pnl)}
                             </span>
                             <button
-                              onClick={() => setConfirmClearPos(pos)}
+                              onClick={() => handleClearPosition(pos)}
                               disabled={isClearing}
                               className="rounded p-0.5 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-red)]/20 hover:text-[var(--color-red)] disabled:opacity-50"
                               title="Clear position"
@@ -688,7 +709,7 @@ export function TradeBottomPane({
                             </span>
                           </span>
                           <span>
-                            Fees: <span className="font-mono">${Math.abs(pos.cum_fees).toFixed(2)}</span>
+                            Fees: <span className="font-mono">{fmtAmt(Math.abs(pos.cum_fees))}</span>
                           </span>
                           {pos.executor_count > 0 && (
                             <span>{pos.executor_count} executor{pos.executor_count !== 1 ? "s" : ""}</span>
@@ -713,70 +734,62 @@ export function TradeBottomPane({
       )}
 
       {/* Stop confirmation */}
-      {confirmStopId && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-          <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 shadow-xl">
-            <p className="text-sm text-[var(--color-text)]">
-              Stop executor <span className="font-mono text-[var(--color-text-muted)]">{confirmStopId.slice(0, 8)}</span>?
-            </p>
-            <label className="mt-3 flex cursor-pointer select-none items-center gap-2">
-              <input
-                type="checkbox"
-                checked={keepPosition}
-                onChange={(e) => setKeepPosition(e.target.checked)}
-                className="h-4 w-4 rounded border-[var(--color-border)] accent-[var(--color-primary)]"
-              />
-              <span className="text-xs text-[var(--color-text)]">{stopCopy.label}</span>
-            </label>
-            <p className="mt-1 ml-6 text-[11px] text-[var(--color-text-muted)]">
-              {keepPosition ? stopCopy.checked : stopCopy.unchecked}
-            </p>
-            <div className="mt-3 flex justify-end gap-2">
-              <button
-                onClick={() => setConfirmStopId(null)}
-                className="rounded px-3 py-1.5 text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => stopMutation.mutate({ id: confirmStopId, keep: keepPosition })}
-                className="rounded bg-[var(--color-red)] px-3 py-1.5 text-xs font-medium text-white hover:brightness-110"
-              >
-                Stop
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <ConfirmDialog
+        open={confirmStopId !== null}
+        title="Stop executor"
+        confirmLabel="Stop"
+        pendingLabel="Stopping..."
+        isPending={stopMutation.isPending}
+        isError={stopMutation.isError}
+        errorText={stopMutation.error?.message || "Failed to stop the executor."}
+        onConfirm={() => {
+          if (confirmStopId && !stopMutation.isPending) {
+            stopMutation.mutate({ id: confirmStopId, keep: keepPosition });
+          }
+        }}
+        onClose={() => setConfirmStopId(null)}
+      >
+        <p className="text-[var(--color-text)]">
+          Stop executor <span className="font-mono text-[var(--color-text-muted)]">{confirmStopId?.slice(0, 8)}</span>?
+        </p>
+        <label className="mt-3 flex cursor-pointer select-none items-center gap-2">
+          <input
+            type="checkbox"
+            checked={keepPosition}
+            onChange={(e) => setKeepPosition(e.target.checked)}
+            className="h-4 w-4 rounded border-[var(--color-border)] accent-[var(--color-primary)]"
+          />
+          <span className="text-xs text-[var(--color-text)]">{stopCopy.label}</span>
+        </label>
+        <p className="mt-1 ml-6 text-[11px] text-[var(--color-text-muted)]">
+          {keepPosition ? stopCopy.checked : stopCopy.unchecked}
+        </p>
+      </ConfirmDialog>
 
       {/* Clear position confirmation */}
-      {confirmClearPos && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-          <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 shadow-xl">
-            <p className="text-sm text-[var(--color-text)]">
-              Clear <span className="font-medium">{confirmClearPos.position_side?.toUpperCase()}</span> position on{" "}
-              <span className="font-mono text-[var(--color-text-muted)]">{confirmClearPos.trading_pair}</span>?
-            </p>
-            <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">
-              This resets the tracked position state. It does not close the position on the exchange.
-            </p>
-            <div className="mt-3 flex justify-end gap-2">
-              <button
-                onClick={() => setConfirmClearPos(null)}
-                className="rounded px-3 py-1.5 text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => clearPositionMutation.mutate(confirmClearPos)}
-                className="rounded bg-[var(--color-red)] px-3 py-1.5 text-xs font-medium text-white hover:brightness-110"
-              >
-                Clear
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <ConfirmDialog
+        open={confirmClearPos !== null}
+        title="Clear position"
+        confirmLabel="Clear"
+        pendingLabel="Clearing..."
+        isPending={clearPositionMutation.isPending}
+        isError={clearPositionMutation.isError}
+        errorText={clearPositionMutation.error?.message || "Failed to clear the position."}
+        onConfirm={() => {
+          if (confirmClearPos && !clearPositionMutation.isPending) {
+            clearPositionMutation.mutate(confirmClearPos);
+          }
+        }}
+        onClose={() => setConfirmClearPos(null)}
+      >
+        <p className="text-[var(--color-text)]">
+          Clear <span className="font-medium">{confirmClearPos?.position_side?.toUpperCase()}</span> position on{" "}
+          <span className="font-mono text-[var(--color-text-muted)]">{confirmClearPos?.trading_pair}</span>?
+        </p>
+        <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">
+          This resets the tracked position state. It does not close the position on the exchange.
+        </p>
+      </ConfirmDialog>
     </div>
   );
 }

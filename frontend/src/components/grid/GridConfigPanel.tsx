@@ -10,6 +10,7 @@ import {
   ToggleField,
 } from "@/components/executor/fields";
 import { ORDER_TYPE_OPTIONS } from "@/components/executor/field-options";
+import { formatQuoteAmount } from "@/lib/formatters";
 import { autoFillGridPrices, gridConfigErrors, gridPriceFieldValid } from "@/lib/gridExecutor";
 import type { GridState, GridAction } from "@/lib/gridExecutor";
 
@@ -183,7 +184,7 @@ export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false,
             {validation.levels > 0 && (
               <>
                 <p>
-                  ~{validation.levels} levels &middot; ~${perLevel.toFixed(2)}/level
+                  ~{validation.levels} levels &middot; ~{formatQuoteAmount(perLevel, quoteCurrency)}/level
                   {validation.levelConstraint === "amount" && (
                     <span className="ml-1 text-amber-400">(limited by amount)</span>
                   )}

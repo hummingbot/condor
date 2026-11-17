@@ -34,6 +34,10 @@ import {
   invalidateServerScopedQueries,
   parseControllerPerfHistoryKey,
   parseExecutorsKey,
+  PRICE_REFETCH_MS,
+  priceQuery,
+  queryClient as appQueryClient,
+  shouldRetryQuery,
 } from "@/lib/queryClient";
 
 const PREVIOUS = "server-a";
@@ -77,6 +81,37 @@ beforeEach(() => {
 
 afterEach(() => {
   client.clear();
+});
+
+describe("shouldRetryQuery (FD-06)", () => {
+  const withStatus = (status?: number) =>
+    status === undefined ? new Error("network") : Object.assign(new Error("x"), { status });
+
+  it.each([
+    [undefined, true],
+    [500, true],
+    [502, true],
+    [503, true],
+    [408, true],
+    [429, true],
+    [400, false],
+    [401, false],
+    [403, false],
+    [404, false],
+    [409, false],
+    [422, false],
+  ])("status %s on the first failure retries: %s", (status, expected) => {
+    expect(shouldRetryQuery(0, withStatus(status))).toBe(expected);
+  });
+
+  it("never retries a second time", () => {
+    expect(shouldRetryQuery(1, withStatus(503))).toBe(false);
+    expect(shouldRetryQuery(1, withStatus())).toBe(false);
+  });
+
+  it("is the app client's default", () => {
+    expect(appQueryClient.getDefaultOptions().queries?.retry).toBe(shouldRetryQuery);
+  });
 });
 
 describe("invalidateServerScopedQueries", () => {
@@ -529,5 +564,24 @@ describe("agentsQuery", () => {
     observe({ enabled: false });
     await new Promise((r) => setTimeout(r, 20));
     expect(getAgents).not.toHaveBeenCalled();
+  });
+});
+
+describe("priceQuery (FD-11)", () => {
+  it("is one key and one cadence for every observer of a market", () => {
+    const page = priceQuery(PREVIOUS, "binance", "BTC-USDT", { enabled: true });
+    const ticker = priceQuery(PREVIOUS, "binance", "BTC-USDT");
+    expect(page.queryKey).toEqual(["price", PREVIOUS, "binance", "BTC-USDT"]);
+    expect(ticker.queryKey).toEqual(page.queryKey);
+    expect(ticker.refetchInterval).toBe(PRICE_REFETCH_MS);
+    expect(page.refetchInterval).toBe(PRICE_REFETCH_MS);
+  });
+
+  it("is off without a market, or when the venue has no REST price", () => {
+    expect(priceQuery(null, "binance", "BTC-USDT").enabled).toBe(false);
+    expect(priceQuery(PREVIOUS, "", "BTC-USDT").enabled).toBe(false);
+    expect(priceQuery(PREVIOUS, "binance", "").enabled).toBe(false);
+    expect(priceQuery(PREVIOUS, "binance", "BTC-USDT", { enabled: false }).enabled).toBe(false);
+    expect(priceQuery(PREVIOUS, "binance", "BTC-USDT").enabled).toBe(true);
   });
 });

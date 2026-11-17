@@ -71,7 +71,7 @@ let baseline;
 try {
   baseline = JSON.parse(readFileSync(baselinePath, "utf8"));
 } catch {
-  console.error(`Missing or unreadable ${baselinePath}. Run: npm run lint:baseline -- --update`);
+  console.error(`Missing or unreadable ${baselinePath}. Run: npm run lint:baseline`);
   process.exit(1);
 }
 
@@ -87,14 +87,14 @@ for (const key of new Set([...Object.keys(counts), ...Object.keys(baseline)])) {
 if (regressions.length) {
   console.error(`\nNew lint errors not in the baseline:\n${regressions.join("\n")}`);
   console.error("\nFix them, or if they are genuinely acceptable, run:");
-  console.error("  npm run lint:baseline -- --update\n");
+  console.error("  npm run lint:baseline\n");
   process.exit(1);
 }
 
 if (fixed.length) {
   console.error(`\nBaseline is stale — these are already fixed:\n${fixed.join("\n")}`);
   console.error("\nBank the improvement so it cannot regress:");
-  console.error("  npm run lint:baseline -- --update\n");
+  console.error("  npm run lint:baseline\n");
   process.exit(1);
 }
 

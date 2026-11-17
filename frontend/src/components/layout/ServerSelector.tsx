@@ -1,9 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, Circle, Server, Star } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
-import { useServer } from "@/hooks/useServer";
+import { fallbackServer, useServer } from "@/hooks/useServer";
 import { api, type ServerInfo } from "@/lib/api";
 
 export function ServerSelector() {
@@ -12,7 +12,7 @@ export function ServerSelector() {
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const close = useCallback(() => setOpen(false), []);
 
-  const { data: servers } = useQuery({
+  const { data: servers, dataUpdatedAt, isError } = useQuery({
     queryKey: ["servers"],
     queryFn: api.getServers,
     refetchInterval: 10000,
@@ -22,29 +22,31 @@ export function ServerSelector() {
   const offlineServers = servers?.filter((s) => !s.online) ?? [];
   const totalCount = servers?.length ?? 0;
 
-  // Memoize online server names so the useEffect dep is stable between refetches
-  const onlineServerNames = useMemo(
-    () => onlineServers.map((s) => s.name),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [JSON.stringify(onlineServers.map((s) => s.name))],
-  );
+  // Where to land when nothing usable is selected. The backend's default is
+  // the same `chat_defaults` entry Telegram sets, so setting a default in
+  // either surface is honoured by the other.
+  const fallback = servers ? fallbackServer(servers) : null;
+  const known = !!servers;
+  const exists = servers?.some((s) => s.name === server) ?? false;
 
-  // The server the backend calls this user's default — the same `chat_defaults`
-  // entry Telegram sets. A browser with nothing saved opens on it, so setting a
-  // default in either surface is honoured by the other.
-  const defaultOnlineName = useMemo(
-    () => onlineServers.find((s) => s.is_default)?.name ?? null,
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [JSON.stringify(onlineServers.map((s) => [s.name, s.is_default]))],
-  );
-
-  // Auto-select only when no server is saved yet: the user's default if it is
-  // up, otherwise the first server that is.
+  // When the current selection was made. A name is only called missing by a
+  // list fetched *after* it was selected: a server picked a moment after it was
+  // added can be newer than the cached list, and must not be thrown out by it.
+  const selectedAt = useRef(0);
   useEffect(() => {
-    if (!server && onlineServerNames.length > 0) {
-      setServer(defaultOnlineName ?? onlineServerNames[0]);
-    }
-  }, [server, onlineServerNames, defaultOnlineName, setServer]);
+    selectedAt.current = Date.now();
+  }, [server]);
+
+  // Auto-select when no server is saved yet — and when the saved one is gone.
+  // A persisted name that was deleted, renamed or unshared used to stay
+  // selected for good: the header said "No server" while every page kept
+  // querying the dead name (FU-09). A server that is merely offline still
+  // exists and stays selected; that is for the user to see, not to undo.
+  useEffect(() => {
+    if (!known || exists) return;
+    if (server && dataUpdatedAt < selectedAt.current) return;
+    if (fallback !== server) setServer(fallback);
+  }, [known, exists, server, fallback, dataUpdatedAt, setServer]);
 
   const current = servers?.find((s) => s.name === server);
 
@@ -53,14 +55,20 @@ export function ServerSelector() {
       <button
         ref={setAnchor}
         onClick={() => setOpen(!open)}
+        title={current && !current.online ? `${current.name} is offline` : undefined}
         aria-expanded={open}
         aria-haspopup="listbox"
         className="flex items-center gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 text-sm hover:bg-[var(--color-surface-hover)] transition-colors"
       >
         <Server className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]" />
         <span className="truncate max-w-[120px]">{current?.name || "No server"}</span>
-        {current?.online && (
-          <Circle className="h-1.5 w-1.5 shrink-0 fill-current text-[var(--color-green)]" />
+        {current && (
+          <Circle
+            className={`h-1.5 w-1.5 shrink-0 fill-current ${
+              current.online ? "text-[var(--color-green)]" : "text-[var(--color-red)]"
+            }`}
+            aria-label={current.online ? "Online" : "Offline"}
+          />
         )}
         <ChevronDown className={`h-3 w-3 shrink-0 text-[var(--color-text-muted)] transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
@@ -76,7 +84,9 @@ export function ServerSelector() {
           {servers ? `API Servers (${onlineServers.length}/${totalCount} online)` : "API Servers"}
         </div>
         {!servers && (
-          <div className="px-3 py-2 text-xs text-[var(--color-text-muted)]">Loading…</div>
+          <div className="px-3 py-2 text-xs text-[var(--color-text-muted)]">
+            {isError ? "Could not load servers" : "Loading…"}
+          </div>
         )}
         {onlineServers.map((s: ServerInfo) => (
           <button

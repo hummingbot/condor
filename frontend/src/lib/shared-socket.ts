@@ -31,9 +31,10 @@ import {
   parseExecutorsKey,
   queryClient,
 } from "./queryClient";
-import type {
-  ControllerPerformanceHistoryResponse,
-  ControllerPerformanceSnapshot,
+import {
+  reportUnauthorized,
+  type ControllerPerformanceHistoryResponse,
+  type ControllerPerformanceSnapshot,
 } from "./api";
 import { CondorWebSocket } from "./websocket";
 
@@ -206,6 +207,21 @@ function mergeExecutorPages(
 }
 
 /**
+ * Upsert executor rows into the `["executors-infinite", server]` walk by id.
+ *
+ * The one write path into that cache besides its own fetch: the live frames
+ * below and the fleet browser's head poll (`executorsHeadQuery`,
+ * hooks/useFleetData.ts) both go through it, so neither can reintroduce the
+ * replace-by-position `mergeExecutorPages` exists to prevent.
+ */
+export function foldExecutorsIntoPages(server: string, rows: ExecutorFrameRow[]): void {
+  queryClient.setQueryData(
+    ["executors-infinite", server],
+    (old: ExecutorPages | undefined) => mergeExecutorPages(old, rows),
+  );
+}
+
+/**
  * Whether this socket has ever been up, so the first connect is not read as a gap.
  */
 let everConnected = false;
@@ -232,6 +248,11 @@ let everConnected = false;
  * a connection, and the queries are loading their first full walk at that exact
  * moment. Both roots are re-checked separately (`CONTROLLER_PERF_ROOTS`)
  * because react-query matches key arrays element by element.
+ *
+ * The executor walk is repaired here for the same reason (FD-04): it has no
+ * whole-list poll of its own any more, so the frames lost to a drop — an
+ * executor's last one, the one that says it terminated, among them — are only
+ * recovered by refetching it once the connection is back.
  */
 function resyncPerformanceHistories(): void {
   if (!everConnected) {
@@ -241,6 +262,7 @@ function resyncPerformanceHistories(): void {
   for (const root of CONTROLLER_PERF_ROOTS) {
     queryClient.invalidateQueries({ queryKey: [root] });
   }
+  queryClient.invalidateQueries({ queryKey: ["executors-infinite"] });
 }
 
 /**
@@ -315,10 +337,7 @@ export function handleMessage(channel: string, data: unknown): void {
 
       // The paginated list the browser walks reads the same frame, but it can
       // only be merged into — see `mergeExecutorPages`.
-      queryClient.setQueryData(
-        ["executors-infinite", server],
-        (old: ExecutorPages | undefined) => mergeExecutorPages(old, allExecs),
-      );
+      foldExecutorsIntoPages(server, allExecs);
     }
   } else if (prefix === "controller_perf") {
     const incoming = data as { snapshots?: ControllerPerformanceSnapshot[] };
@@ -380,6 +399,11 @@ function openSocket(token: string): CondorWebSocket {
     resyncPerformanceHistories();
     for (const handler of connectHandlers) handler();
   });
+
+  // The socket has given up on a token the server refuses. Hand it to the same
+  // handler a REST 401 reaches: it ends the session, or claims a new one in
+  // local mode — and a new token re-acquires the socket (see `acquireSocket`).
+  ws.onAuthFailure(() => void reportUnauthorized());
 
   // The candle store reads candle frames straight off this socket.
   candleStore.attachWs(ws);
