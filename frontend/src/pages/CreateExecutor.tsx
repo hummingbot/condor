@@ -122,6 +122,7 @@ export function CreateExecutor() {
   // The interval the chart draws: the picked one, stepped up when the range
   // would not fit the candle budget at it (1m × 30d is 43,200 candles).
   const intervalMin = intervalFloor(gridState.lookbackSeconds);
+  const intervalMinIdx = INTERVALS.indexOf(intervalMin);
   const chartInterval = resolveChartInterval(gridState.interval, gridState.lookbackSeconds);
   const isSpot = isSpotConnector(connector);
   // A CLOB pair is already <BASE>-<QUOTE>, so the tickers come off the split.
@@ -700,24 +701,22 @@ export function CreateExecutor() {
         {/* Interval + Range */}
         <div className="flex items-center gap-3 border-l border-[var(--color-border)] px-4 py-2">
           <div className="flex overflow-hidden rounded-md border border-[var(--color-border)]">
-            {INTERVALS.map((iv) => {
-              const tooFine = INTERVALS.indexOf(iv) < INTERVALS.indexOf(intervalMin);
-              return (
-                <button
-                  key={iv}
-                  onClick={() => gridDispatch({ type: "SET_FIELD", field: "interval", value: iv })}
-                  disabled={tooFine}
-                  title={tooFine ? `Too fine for this range — ${intervalMin} is the finest it can be drawn at` : undefined}
-                  className={`px-2.5 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-40 ${
-                    chartInterval === iv
-                      ? "bg-[var(--color-primary)] text-white"
-                      : "bg-[var(--color-bg)] text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-                  }`}
-                >
-                  {iv}
-                </button>
-              );
-            })}
+            {INTERVALS.map((iv, i) => (
+              <button
+                key={iv}
+                onClick={() => gridDispatch({ type: "SET_FIELD", field: "interval", value: iv })}
+                // Finer than the range can be drawn at: off, and saying why.
+                disabled={i < intervalMinIdx}
+                title={i < intervalMinIdx ? `Too fine for this range — ${intervalMin} is the finest it can be drawn at` : undefined}
+                className={`px-2.5 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-40 ${
+                  chartInterval === iv
+                    ? "bg-[var(--color-primary)] text-white"
+                    : "bg-[var(--color-bg)] text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+                }`}
+              >
+                {iv}
+              </button>
+            ))}
           </div>
 
           <div className="flex items-center gap-1.5">
