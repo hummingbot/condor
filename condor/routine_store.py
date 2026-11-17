@@ -102,22 +102,43 @@ class _HttpBot:
         self._token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get(
             "TELEGRAM_TOKEN", ""
         )
+        self._client = None
+        self._client_loop = None
+
+    def _http(self):
+        """One client for every message, not one per message (XC-12).
+
+        A client per call meant a fresh TLS handshake to Telegram for each
+        notification a web/MCP-started routine sent. Created lazily, and again
+        if the event loop changed under it: an ``httpx.AsyncClient`` is bound
+        to the loop it first ran on, and this singleton outlives a loop in
+        tests and in short-lived callers.
+        """
+        import httpx
+
+        loop = asyncio.get_running_loop()
+        if (
+            self._client is None
+            or self._client.is_closed
+            or self._client_loop is not loop
+        ):
+            self._client = httpx.AsyncClient(timeout=30)
+            self._client_loop = loop
+        return self._client
 
     async def _post(self, method: str, data: dict, files: dict | None = None):
         if not self._token:
             return None
-        import httpx
-
         url = f"https://api.telegram.org/bot{self._token}/{method}"
-        async with httpx.AsyncClient(timeout=30) as client:
-            if files:
-                resp = await client.post(url, data=data, files=files)
-            else:
-                resp = await client.post(url, json=data)
-            result = resp.json()
-            if not result.get("ok"):
-                logger.warning(f"Telegram {method} failed: {resp.text}")
-            return result
+        client = self._http()
+        if files:
+            resp = await client.post(url, data=data, files=files)
+        else:
+            resp = await client.post(url, json=data)
+        result = resp.json()
+        if not result.get("ok"):
+            logger.warning(f"Telegram {method} failed: {resp.text}")
+        return result
 
     async def send_message(self, *a, **kw):
         chat_id = kw.get("chat_id") or (a[0] if a else None)
