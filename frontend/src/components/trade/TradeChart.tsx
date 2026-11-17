@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 
 import { useCandleStore } from "@/hooks/useCandleStore";
 import { useRates } from "@/hooks/useRates";
-import { api, type ConsolidatedPosition } from "@/lib/api";
+import { api, type CandleData, type ConsolidatedPosition } from "@/lib/api";
 import { candleChannelKey, candleStore } from "@/lib/candle-store";
 import type { ChartLineSlot, ExtraLine, PickSlot } from "@/components/executor/types";
 import { createOverlayTooltipView, getExecutorColor, type ExecutorOverlay } from "@/lib/executor-overlays";
@@ -59,6 +59,48 @@ export interface ChartPriceAxis {
   height(): number;
   /** Subscribe to scale changes; returns its own unsubscribe. */
   onScaleChange(cb: () => void): () => void;
+}
+
+/**
+ * How many newer candles the live listener will `update()` one by one before a
+ * single `setData()` is the cheaper way to say the same thing.
+ */
+const MAX_INCREMENTAL_BARS = 50;
+
+/** The tail of `stored` the picker's range names, measured from the newest candle. */
+function rangeTail(stored: CandleData[], lookbackSeconds: number): CandleData[] {
+  if (!stored.length) return stored;
+  const cutoff = stored[stored.length - 1].timestamp - lookbackSeconds;
+  const start = stored.findIndex((c) => c.timestamp >= cutoff);
+  return start <= 0 ? stored : stored.slice(start);
+}
+
+function toBar(c: CandleData) {
+  return {
+    time: c.timestamp as import("lightweight-charts").UTCTimestamp,
+    open: c.open,
+    high: c.high,
+    low: c.low,
+    close: c.close,
+  };
+}
+
+/**
+ * Whether `next` differs from what the chart drew (`drawn`) anywhere *before*
+ * the last drawn bar — a bar inserted or rewritten where `series.update()`
+ * cannot reach. Bars that slid out of the front of the range are not a change:
+ * the chart simply keeps them.
+ */
+function olderBarsChanged(drawn: CandleData[], next: CandleData[], lastDrawnTs: number): boolean {
+  let i = 0;
+  for (const c of next) {
+    if (c.timestamp >= lastDrawnTs) break;
+    while (i < drawn.length && drawn[i].timestamp < c.timestamp) i++;
+    const d = drawn[i];
+    if (!d || d.timestamp !== c.timestamp) return true;
+    if (d.open !== c.open || d.high !== c.high || d.low !== c.low || d.close !== c.close) return true;
+  }
+  return false;
 }
 
 interface TradeChartProps {
@@ -214,12 +256,10 @@ export function TradeChart({
   // chart's range. So the chart draws the tail its own picker names, measured
   // back from the newest candle rather than the clock, which would make render
   // impure.
-  const candles = useMemo(() => {
-    if (!storedCandles.length) return storedCandles;
-    const cutoff = storedCandles[storedCandles.length - 1].timestamp - lookbackSeconds;
-    const start = storedCandles.findIndex((c) => c.timestamp >= cutoff);
-    return start <= 0 ? storedCandles : storedCandles.slice(start);
-  }, [storedCandles, lookbackSeconds]);
+  const candles = useMemo(
+    () => rangeTail(storedCandles, lookbackSeconds),
+    [storedCandles, lookbackSeconds],
+  );
 
   // ── Filter executor overlays to those within candle time range ──
   // Depend on the earliest candle timestamp (not the candles array, whose reference
@@ -558,6 +598,13 @@ export function TradeChart({
   // pair/interval/range switch, history backfill/prepend) apart from a live
   // tick, where the listener below already applied a cheap series.update().
   const lastSetDataSigRef = useRef<string>("");
+  // What the series currently holds, and for which channel. The live listener
+  // diffs each store frame against it: a frame can carry many candles (the
+  // whole-buffer snapshot after a WS reconnect, a REST-fallback poll), and
+  // every one newer than the last drawn bar has to reach the chart.
+  const drawnRef = useRef<{ key: string; bars: CandleData[] } | null>(null);
+  const lookbackRef = useRef(lookbackSeconds);
+  lookbackRef.current = lookbackSeconds;
 
   // ── Push candle data to chart (full setData only on structural changes) ──
   useEffect(() => {
@@ -592,35 +639,48 @@ export function TradeChart({
 
     if (!needsFullReset) return;
 
-    const mapped = candles.map((c) => ({
-      time: c.timestamp as import("lightweight-charts").UTCTimestamp,
-      open: c.open,
-      high: c.high,
-      low: c.low,
-      close: c.close,
-    }));
-    seriesRef.current.setData(mapped);
+    seriesRef.current.setData(candles.map(toBar));
+    drawnRef.current = { key, bars: candles };
 
     // Every full render is a new picture — a market, a range, or the history a
     // backfill just brought in — so the view fits it. Live ticks never get here.
     chartRef.current?.timeScale().fitContent();
   }, [candles, chartReady, server, connector, pair, interval, poolAddress, lookbackSeconds]);
 
-  // ── Real-time last candle update via candle store listener ──
+  // ── Real-time candle updates via candle store listener ──
+  // A store frame is not always one tick: a reconnect re-sends the whole
+  // buffer and the REST fallback broadcasts a list, so every candle from the
+  // last drawn bar forward is applied, oldest first — `update()` takes the last
+  // bar or a newer one, nothing else. A long gap, or a bar changed behind the
+  // last drawn one, is redrawn in one `setData()` instead, without refitting:
+  // the trader's zoom is theirs.
   useEffect(() => {
     if (!chartReady || !seriesRef.current) return;
     const key = candleChannelKey(server, connector, pair, interval, poolAddress);
 
     const removeListener = candleStore.onUpdate(key, (updated) => {
-      if (!seriesRef.current || !updated.length) return;
-      const last = updated[updated.length - 1];
-      seriesRef.current.update({
-        time: last.timestamp as import("lightweight-charts").UTCTimestamp,
-        open: last.open,
-        high: last.high,
-        low: last.low,
-        close: last.close,
-      });
+      const series = seriesRef.current;
+      const drawn = drawnRef.current;
+      // Nothing drawn for this channel yet: the first full render belongs to
+      // the effect above, which runs on the same store frame.
+      if (!series || !updated.length || !drawn || drawn.key !== key || !drawn.bars.length) return;
+
+      const tail = rangeTail(updated, lookbackRef.current);
+      const lastDrawnTs = drawn.bars[drawn.bars.length - 1].timestamp;
+      const from = tail.findIndex((c) => c.timestamp >= lastDrawnTs);
+      // Every candle in the store is older than the last drawn bar: a stale
+      // frame, and `update()` would throw on it.
+      if (from < 0) return;
+
+      if (
+        tail.length - from > MAX_INCREMENTAL_BARS ||
+        olderBarsChanged(drawn.bars, tail, lastDrawnTs)
+      ) {
+        series.setData(tail.map(toBar));
+      } else {
+        for (let i = from; i < tail.length; i++) series.update(toBar(tail[i]));
+      }
+      drawnRef.current = { key, bars: tail };
     });
 
     return removeListener;
