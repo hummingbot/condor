@@ -409,6 +409,16 @@ async def _do_restart(query) -> None:
     """Force a restart without updating anything. Reachable from every screen."""
     from utils.updater import request_restart
 
+    # Not while an update is still being applied. This button also sits on
+    # older messages, and pressed from one of those mid-run it re-exec'd the
+    # interpreter against a venv that `uv sync` was still rewriting.
+    run = updates.current()
+    if run is not None and run.live:
+        await query.edit_message_text(
+            "An update is still being applied. Restart once it has finished."
+        )
+        return
+
     await query.edit_message_text("Restarting Condor...")
     # Let Telegram flush the edit before the shutdown starts.
     await asyncio.sleep(1)

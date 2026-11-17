@@ -476,3 +476,64 @@ def test_the_pane_is_kept_alive_across_the_handover(tmp_path, monkeypatch):
         updater.exec_restart()
 
     assert calls == [True], "remain-on-exit was not enabled before the exec"
+
+
+def test_restart_now_is_refused_while_an_update_is_being_applied():
+    """An old message's button, pressed mid-run, re-exec'd against a half-synced venv."""
+    import asyncio
+
+    from handlers.admin import update as update_handler
+
+    run = _a_run()
+    assert run.live
+    update_run._current = run
+    query = Mock(edit_message_text=AsyncMock())
+
+    with patch.object(updater, "request_restart") as request_restart:
+        asyncio.run(update_handler._do_restart(query))
+
+    request_restart.assert_not_called()
+    assert "still being applied" in query.edit_message_text.call_args.args[0]
+
+
+def test_restart_now_still_restarts_once_the_run_has_finished():
+    import asyncio
+
+    from handlers.admin import update as update_handler
+
+    run = _a_run()
+    run.state = update_run.SUCCEEDED
+    update_run._current = run
+    query = Mock(edit_message_text=AsyncMock())
+
+    with (
+        patch.object(updater, "request_restart") as request_restart,
+        patch.object(update_handler.asyncio, "sleep", AsyncMock()),
+    ):
+        asyncio.run(update_handler._do_restart(query))
+
+    request_restart.assert_called_once_with()
+
+
+def test_a_timed_out_command_takes_its_children_with_it(tmp_path):
+    """The direct child is often a shell; what it started has to die too (OP-12)."""
+    import asyncio
+    import time
+
+    pid_file = tmp_path / "grandchild.pid"
+    script = f"sleep 60 & echo $! > {pid_file}; wait"
+
+    rc, out = asyncio.run(updater._run_cmd("bash", "-c", script, timeout=1))
+
+    assert rc == 124 and "Timed out" in out
+    grandchild = int(pid_file.read_text().strip())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(grandchild, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        os.kill(grandchild, signal.SIGKILL)
+        pytest.fail("the grandchild outlived the timeout")

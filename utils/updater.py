@@ -48,6 +48,20 @@ FRONTEND_BUILD_TIMEOUT = 1200
 DOCKER_TIMEOUT = 1800
 
 
+def _kill_process_group(proc: "asyncio.subprocess.Process") -> None:
+    """SIGKILL ``proc`` and everything in its process group."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    except (OSError, AttributeError):
+        # No group to signal (or no killpg here): fall back to the child alone.
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+
+
 async def _run_cmd(
     *args: str, cwd: str | None = None, timeout: float | None = None
 ) -> tuple[int, str]:
@@ -58,12 +72,18 @@ async def _run_cmd(
         stderr=asyncio.subprocess.PIPE,
         stdin=asyncio.subprocess.DEVNULL,
         cwd=cwd,
+        # Its own session, and so its own process group: the timeout below has
+        # to be able to kill everything the command started, not just it.
+        start_new_session=True,
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except (asyncio.TimeoutError, TimeoutError):
         # Kill the whole thing: a half-finished build is not worth waiting on.
-        proc.kill()
+        # The whole *group* — for the frontend build and doctor the direct
+        # child is a shell, and killing only that left npm/vite/uv running
+        # into the same directories the retry was about to use.
+        _kill_process_group(proc)
         await proc.wait()
         cmd = " ".join(args[:3])
         logger.error("Command timed out after %ss: %s", timeout, cmd)

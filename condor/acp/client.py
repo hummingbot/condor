@@ -721,13 +721,7 @@ class ACPClient:
                 timeout=max(0.0, deadline - time.monotonic()),
             )
         except asyncio.TimeoutError:
-            detail = await self._stderr_detail()
-            await self.stop()
-            raise TimeoutError(
-                f"The agent did not complete the ACP handshake within "
-                f"{TIMEOUTS.agent_handshake}s and was killed (cmd={self.command}). "
-                f"Check that the command runs and speaks ACP on stdio.{detail}"
-            ) from None
+            raise await self._handshake_timeout_error() from None
         except Exception as exc:
             # Handshake failed -- kill the subprocess to prevent orphan
             detail = await self._stderr_detail()
@@ -759,9 +753,24 @@ class ACPClient:
         # which a pin can be checked against what the bridge really offers. Env
         # is not one (see resolve_acp), and without a pin the bridge falls back
         # to Claude Code's settings.model or the first model it advertises.
-        await self._select_model(result)
+        # Under the same deadline: the pin is the handshake's third request,
+        # and a bridge that answers ``session/new`` and then goes quiet parks
+        # ``start()`` exactly as a mute one did before CORR-333.
+        await self._select_model(result, deadline)
 
-    async def _select_model(self, session: dict) -> None:
+    async def _handshake_timeout_error(self) -> TimeoutError:
+        """Kill the bridge and build the error for a handshake that ran out of time."""
+        from condor.runtime.timeouts import TIMEOUTS
+
+        detail = await self._stderr_detail()
+        await self.stop()
+        return TimeoutError(
+            f"The agent did not complete the ACP handshake within "
+            f"{TIMEOUTS.agent_handshake}s and was killed (cmd={self.command}). "
+            f"Check that the command runs and speaks ACP on stdio.{detail}"
+        )
+
+    async def _select_model(self, session: dict, deadline: float | None = None) -> None:
         """Resolve ``self.model`` against advertised models and set it via ACP.
 
         ``session`` is the ``session/new`` response. Bridges advertise models in
@@ -799,8 +808,18 @@ class ACPClient:
         else:
             method = "session/set_model"
             params = {"sessionId": self._session_id, "modelId": target}
+        # ``deadline`` is what is left of ``start()``'s handshake budget
+        # (``time.monotonic()`` based); None only for a caller with no budget.
+        timeout = None if deadline is None else max(0.0, deadline - time.monotonic())
         try:
-            await self._peer.send_request(method, params, self._process.stdin)
+            await self._peer.send_request(
+                method, params, self._process.stdin, timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            # Not a refusal: the bridge said nothing at all. Same outcome as a
+            # mute ``initialize`` -- killed, and reported as a handshake timeout
+            # rather than as a pin the bridge turned down.
+            raise await self._handshake_timeout_error() from None
         except Exception as exc:
             raise await self._model_pin_error(
                 f"the bridge refused {method} for the pinned model "

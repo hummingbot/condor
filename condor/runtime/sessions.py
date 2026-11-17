@@ -1114,7 +1114,13 @@ async def _health_check_loop() -> None:
     try:
         while True:
             await asyncio.sleep(15)
-            await _sweep_sessions()
+            # Per pass, not around the loop: one exception out of a sweep used
+            # to end dead-session reaping and idle detach for the life of the
+            # process, with nothing in the log to say so.
+            try:
+                await _sweep_sessions()
+            except Exception:
+                log.exception("Agent health sweep failed; retrying next pass")
     except asyncio.CancelledError:
         pass
 

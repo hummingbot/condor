@@ -18,6 +18,8 @@ from typing import Any, Callable, Dict, Optional, Tuple
 import yaml
 from aiohttp import ClientTimeout
 
+from condor.fsutil import atomic_write_text
+
 try:  # POSIX only; elsewhere the cross-process lock is a no-op.
     import fcntl
 except ImportError:  # pragma: no cover - Windows
@@ -338,6 +340,20 @@ class ConfigManager:
         """Path of the rotating backup written before each save."""
         return self.config_path.with_suffix(self.config_path.suffix + ".bak")
 
+    @staticmethod
+    def _backup_worthy(path: Path) -> bool:
+        """Whether ``path`` is a complete config, fit to rotate into ``.bak``.
+
+        ``version`` is the last section written, so its presence is what tells
+        a whole file from one cut short that happens to still be valid YAML.
+        """
+        try:
+            with open(path, "r") as f:
+                data = yaml.safe_load(f)
+        except Exception:
+            return False
+        return isinstance(data, dict) and "version" in data
+
     def _read_config_file(self, path: Path) -> Optional[dict]:
         """Read and parse a config file. Returns None if unreadable."""
         try:
@@ -472,9 +488,18 @@ class ConfigManager:
             # not persisted. The projection is generated so it can no longer
             # fall behind the declaration (ARCH-738).
             data = self._projection(self._store)
-            # Keep a copy of the last known-good file before truncating it,
-            # so a partial write can be recovered from on the next load.
-            if self.config_path.exists():
+            # Serialized before anything on disk is touched, so a value that
+            # cannot be dumped costs neither the file nor its backup.
+            text = yaml.dump(
+                data,
+                default_flow_style=False,
+                sort_keys=False,
+                allow_unicode=True,
+            )
+            # Keep a copy of the last known-good file before replacing it. Only
+            # a file that still reads as a whole config is worth keeping: a
+            # damaged one copied here would overwrite the one good copy left.
+            if self._backup_worthy(self.config_path):
                 try:
                     shutil.copy2(self.config_path, self._backup_path)
                     os.chmod(self._backup_path, 0o600)
@@ -482,18 +507,16 @@ class ConfigManager:
                     logger.warning(f"Failed to back up config: {e}")
 
             # Owner-only (SEC review C5): this file holds the hub token and
-            # server credentials. ``os.open``'s mode applies only when it
-            # creates the file, so an existing 0644 file is tightened too.
-            fd = os.open(self.config_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            os.chmod(self.config_path, 0o600)
-            with os.fdopen(fd, "w") as f:
-                yaml.dump(
-                    data,
-                    f,
-                    default_flow_style=False,
-                    sort_keys=False,
-                    allow_unicode=True,
-                )
+            # server credentials. The atomic write keeps the target's mode, so
+            # an existing 0644 file is tightened first; a new one is born 0600.
+            if self.config_path.exists():
+                os.chmod(self.config_path, 0o600)
+            # Temp file + rename, never truncate-in-place: a kill, power loss
+            # or full disk mid-write used to leave a short file that often
+            # still parsed, with fewer keys, and was then saved back as truth.
+            # The cross-process lock is on ``config.yml.lock``, so replacing
+            # the inode does not disturb it.
+            atomic_write_text(self.config_path, text)
             logger.debug(f"Saved config to {self.config_path}")
         except Exception as e:
             logger.error(f"Failed to save config: {e}")
@@ -522,14 +545,15 @@ class ConfigManager:
                 self._audit_log = self._audit_log[-self.MAX_AUDIT_LOG_ENTRIES :]
 
             data = {"entries": self._audit_log}
-            with open(self.audit_log_path, "w") as f:
+            atomic_write_text(
+                self.audit_log_path,
                 yaml.dump(
                     data,
-                    f,
                     default_flow_style=False,
                     sort_keys=False,
                     allow_unicode=True,
-                )
+                ),
+            )
             logger.debug(f"Saved {len(self._audit_log)} audit log entries")
         except Exception as e:
             logger.error(f"Failed to save audit log: {e}")

@@ -369,3 +369,67 @@ def test_available_models_reports_login_state(monkeypatch):
         "groq",
         "google",
     }
+
+
+def test_probing_bridges_does_not_block_the_event_loop(monkeypatch):
+    """acp_bridges() shells out to npm and the keychain; it must not stall ticks (XC-08)."""
+    import threading
+    import time
+
+    loop_thread = threading.get_ident()
+    seen = {}
+
+    def slow_bridges():
+        seen["thread"] = threading.get_ident()
+        time.sleep(0.3)
+        return []
+
+    monkeypatch.setattr(readiness, "acp_bridges", slow_bridges)
+
+    async def scenario():
+        ticks = 0
+
+        async def ticker():
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.01)
+                ticks += 1
+
+        task = asyncio.create_task(ticker())
+        await readiness.probe_all(["claude-code"])
+        task.cancel()
+        return ticks
+
+    ticks = asyncio.run(scenario())
+    assert seen["thread"] != loop_thread
+    assert ticks >= 5, f"the loop only ticked {ticks} times during a 0.3s probe"
+
+
+def test_local_servers_are_probed_together(monkeypatch):
+    """One dead server's timeout is not queued in front of the next (RT-13)."""
+    import time
+
+    class SlowClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, url):
+            await asyncio.sleep(0.2)
+            raise OSError("connection refused")
+
+    monkeypatch.setattr(readiness.httpx, "AsyncClient", SlowClient)
+    assert len(readiness.LOCAL_PREFIXES) >= 2
+
+    started = time.monotonic()
+    result = asyncio.run(readiness.local_servers())
+    elapsed = time.monotonic() - started
+
+    assert list(result) == list(readiness.LOCAL_PREFIXES)
+    assert all(entry["reachable"] is False for entry in result.values())
+    assert elapsed < 0.2 * len(readiness.LOCAL_PREFIXES)

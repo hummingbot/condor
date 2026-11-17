@@ -129,6 +129,9 @@ class ReportBuilder:
         still holds a plain SVG figure. Pass ``optimize=False`` when the report
         needs the figure serialized exactly as built.
         """
+        from condor.plotly_compat import ensure_plotly_templates_patched
+
+        ensure_plotly_templates_patched()
         if optimize:
             import plotly.io as pio
 

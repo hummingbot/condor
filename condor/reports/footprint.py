@@ -9,6 +9,10 @@ from typing import Any
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+from condor.plotly_compat import ensure_plotly_templates_patched
+
+ensure_plotly_templates_patched()
+
 
 def _number(value: Any) -> float:
     try:

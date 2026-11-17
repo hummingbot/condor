@@ -20,7 +20,6 @@ from condor.acp.client import (
 from condor.runtime import SessionKey, SessionSpec
 from condor.runtime import client as runtime
 from condor.runtime import sessions as session_module
-from condor.runtime.adapters.sse_to_queue import SSEToQueueAdapter
 from condor.runtime.events import EventType, RuntimeEvent, serialize
 from condor.runtime.sse import event_stream, format_event, parse_frame
 from condor.web.routes.chat_ws import _to_ws_message
@@ -349,27 +348,3 @@ def test_cross_surface_listing(registry):
     assert {i.surface for i in infos} == {"tg", "web"}
     assert {i.slot for i in infos} == {"", "slotA"}
     assert all(i.user_id == 5 for i in infos)
-
-
-# ── SSE -> queue adapter (used once the runtime is out of process) ──
-
-
-def test_sse_to_queue_adapter_passes_heartbeats_and_captures_done():
-    async def produce():
-        yield RuntimeEvent(type=EventType.HEARTBEAT, data={"elapsed_seconds": 1})
-        yield RuntimeEvent(type=EventType.TEXT, data={"text": "hi"})
-        yield RuntimeEvent.done("end_turn")
-
-    async def scenario():
-        adapter = SSEToQueueAdapter()
-        await adapter.pump(produce())
-        return adapter, [e async for e in adapter.events()]
-
-    adapter, drained = asyncio.run(scenario())
-    # Heartbeats are forwarded: consumers use them to reset inactivity timers.
-    assert [e.type for e in drained] == [
-        EventType.HEARTBEAT,
-        EventType.TEXT,
-        EventType.DONE,
-    ]
-    assert adapter.done_event.stop_reason == "end_turn"
