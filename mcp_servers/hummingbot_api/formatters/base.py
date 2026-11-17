@@ -8,6 +8,7 @@ from dictionaries with fallback support.
 """
 
 from datetime import datetime, timezone
+from decimal import Context, Decimal, InvalidOperation
 from typing import Any
 
 
@@ -50,6 +51,67 @@ def format_number(num: Any, decimals: int = 2, compact: bool = True) -> str:
         return f"{num_float:.{decimals}f}"
     except (ValueError, TypeError):
         return str(num)
+
+
+#: Significant digits :func:`format_exact` keeps. Twelve is past any tick size
+#: or lot step a venue quotes, and short of the float noise a doubled value
+#: carries (0.1 + 0.2 renders as 0.3, not 0.30000000000000004).
+EXACT_SIGNIFICANT_DIGITS = 12
+
+
+def format_exact(num: Any) -> str:
+    """Render an amount or a price as the number it is — for a table a model trades on.
+
+    No fixed decimal count and no K/M compaction: ``0.015`` stays ``0.015`` (two
+    decimals made it ``0.01``, a third less), ``0.00002345`` stays ``0.00002345``
+    (it rendered as ``0.0000``) and ``12345678.9`` stays ``12345678.9`` (it
+    rendered as ``12.3457M``). Plain positional notation, never an exponent, so
+    the cell can be copied into the next call as-is.
+
+    Examples:
+        >>> format_exact(0.015)
+        '0.015'
+        >>> format_exact("0.00002345")
+        '0.00002345'
+        >>> format_exact(1234.5)
+        '1234.5'
+        >>> format_exact(None)
+        'N/A'
+    """
+    if num is None or num == "N/A" or isinstance(num, bool):
+        return "N/A"
+    try:
+        value = Decimal(str(num))
+    except (InvalidOperation, ValueError, TypeError):
+        return str(num)
+    if not value.is_finite():
+        return str(num)
+    if value == 0:
+        return "0"
+    rounded = Context(prec=EXACT_SIGNIFICANT_DIGITS).create_decimal(value)
+    text = format(rounded, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
+
+
+def format_usd(num: Any) -> str:
+    """A USD (or quote) value for a table cell: cents, no K/M, no thousands comma.
+
+    Below one unit the cents would round a small PnL or fee to nothing, so the
+    value falls back to :func:`format_exact`.
+    """
+    if num is None or num == "N/A" or isinstance(num, bool):
+        return "N/A"
+    try:
+        value = float(num)
+    except (ValueError, TypeError):
+        return str(num)
+    if value != value or value in (float("inf"), float("-inf")):
+        return str(num)
+    if value != 0 and abs(value) < 1:
+        return format_exact(num)
+    return f"{value:.2f}"
 
 
 def format_timestamp(ts: Any, format_str: str = "%m/%d %H:%M") -> str:

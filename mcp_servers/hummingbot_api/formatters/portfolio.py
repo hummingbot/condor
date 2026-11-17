@@ -6,8 +6,8 @@ This module provides table formatters for portfolio balances and holdings.
 
 from typing import Any
 
-from .base import format_number, format_table_separator, get_field
-from .table_builder import ColumnDef, TableBuilder
+from .base import format_exact, format_usd, get_field
+from .table_builder import ColumnDef, TableBuilder, render_table
 
 # Default number of LP position rows rendered in the CLMM table. The fetch is
 # not bounded per venue (get_positions_owned returns every position a venue
@@ -17,11 +17,18 @@ from .table_builder import ColumnDef, TableBuilder
 DEFAULT_LP_POSITIONS_LIMIT = 50
 
 
+BALANCE_COLUMNS = ["account", "connector", "token", "total", "available", "value_usd"]
+
+
 def format_portfolio_as_table(portfolio_data: dict[str, Any]) -> str:
     """
     Format portfolio balances as a table string for better LLM processing.
 
-    Columns: token | connector | total | available | value_usd
+    Columns: account | connector | token | total | available | value_usd
+
+    Units are exact (see ``format_exact``) and the connector name is whole: a
+    balance is what an order is sized against, and ``12.3457M`` BONK on
+    ``hyperliquid_perpe`` is neither a size nor a venue.
 
     Portfolio structure:
     {
@@ -41,10 +48,6 @@ def format_portfolio_as_table(portfolio_data: dict[str, Any]) -> str:
     if not portfolio_data:
         return "No portfolio data found."
 
-    # Header
-    header = "token    | connector         | total        | available    | value_usd"
-    separator = format_table_separator(100)
-
     # Flatten nested structure: account -> connector -> balances
     rows = []
     for account_name, connectors in portfolio_data.items():
@@ -56,27 +59,23 @@ def format_portfolio_as_table(portfolio_data: dict[str, Any]) -> str:
                 continue
 
             for balance in balances:
-                token = str(get_field(balance, "token", default="N/A"))[:8]
-                connector = connector_name[:17]
-                total = format_number(
-                    get_field(balance, "units", default=None), decimals=4, compact=True
+                rows.append(
+                    [
+                        account_name,
+                        connector_name,
+                        get_field(balance, "token", default=None),
+                        format_exact(get_field(balance, "units", default=None)),
+                        format_exact(
+                            get_field(balance, "available_units", default=None)
+                        ),
+                        format_usd(get_field(balance, "value", default=None)),
+                    ]
                 )
-                available = format_number(
-                    get_field(balance, "available_units", default=None),
-                    decimals=4,
-                    compact=True,
-                )
-                value_usd = format_number(
-                    get_field(balance, "value", default=None), decimals=2, compact=True
-                )
-
-                row = f"{token:8} | {connector:17} | {total:12} | {available:12} | {value_usd}"
-                rows.append(row)
 
     if not rows:
         return "No portfolio balances found."
 
-    return f"{header}\n{separator}\n" + "\n".join(rows)
+    return render_table(BALANCE_COLUMNS, rows)
 
 
 def _format_lp_price(value: Any) -> str:
@@ -88,7 +87,8 @@ def _format_lp_price(value: Any) -> str:
     """
     if value is None or value == "N/A":
         return "N/A"
-    return f"{float(value):.4f}"
+    float(value)  # a malformed bound is "N/A", not echoed
+    return format_exact(value)
 
 
 LP_POSITION_COLUMNS = [

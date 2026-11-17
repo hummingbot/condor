@@ -4,7 +4,7 @@ Gateway formatters for the Hummingbot MCP server.
 
 from typing import Any
 
-from .base import format_number, format_timestamp
+from .base import format_exact, format_timestamp
 from .table_builder import ColumnDef, TableBuilder
 
 #: Rows of an UNFILTERED token list shown per call. A search shows every match.
@@ -110,8 +110,8 @@ def format_gateway_config_result(result: dict[str, Any]) -> str:
 
 
 def _format_swap_amount(value: Any) -> str:
-    """Format a swap amount or price without K/M compaction."""
-    return format_number(value, decimals=4, compact=False)
+    """Format a swap amount or price exactly: no rounding, no K/M compaction."""
+    return format_exact(value)
 
 
 SWAP_SEARCH_COLUMNS = [
