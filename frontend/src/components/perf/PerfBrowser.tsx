@@ -33,6 +33,7 @@ import {
 import { LogsSection } from "@/components/bots/LogsSection";
 import { PnlEvolutionChart } from "@/components/bots/PnlEvolutionChart";
 import { ExecutorChart } from "@/components/charts/ExecutorChart";
+import { ChartState } from "@/components/charts/ChartState";
 import { LiveDetailPanel } from "@/components/perf/ExecutorTable";
 import { ExecutorRows, StopConfirmDialog } from "@/components/perf/ExecutorRows";
 import { ControllerToggle } from "@/components/perf/ControllerToggle";
@@ -1512,7 +1513,12 @@ export function PerfBrowser({
    * The long `gcTime` is the same fact said to the other end of the cache:
    * clicking down a list of runs and back should not re-walk the first one.
    */
-  const { data: runHistory, isFetching: runHistoryLoading } = useQuery({
+  const {
+    data: runHistory,
+    isFetching: runHistoryLoading,
+    isError: runHistoryFailed,
+    refetch: refetchRunHistory,
+  } = useQuery({
     queryKey: ["run-history", server, scopeRun?.bot_name, scopeRun?.created_at],
     queryFn: () =>
       api.getRunHistory(
@@ -2420,7 +2426,17 @@ export function PerfBrowser({
   // reach it (ARCH-300); what stays here is only the reading of the facts.
   // `server_online` travels with the response because Condor's route reports an
   // unreachable upstream in band rather than as an HTTP error (CORR-299).
-  const notice = chartNotice({
+  // A run whose history request *failed* still gets a curve when there are
+  // closes to draw one from, and `chartNotice` would caption that fallback as
+  // though the run had recorded nothing. The failure outranks that caption:
+  // "could not be read" and "was never recorded" are different facts (FP-10).
+  const notice = runHistoryFailed
+    ? {
+        label: "history unavailable",
+        detail:
+          "This run's performance history could not be read, so the curve is drawn from how its positions closed instead. Reload to try again.",
+      }
+    : chartNotice({
     scopeKind: scope.kind,
     population,
     runHistory,
@@ -3487,6 +3503,15 @@ export function PerfBrowser({
                     <Loader2 className="h-4 w-4 animate-spin text-[var(--color-text-muted)]" />
                     <p className="text-xs text-[var(--color-text-muted)]">Reading this run's history…</p>
                   </div>
+                ) : runHistoryFailed ? (
+                  // The run's history could not be read — which is not the run
+                  // having none. Said, with the way to ask again (FP-10).
+                  <ChartState
+                    kind="error"
+                    message="Could not read this run's performance history"
+                    onRetry={() => void refetchRunHistory()}
+                    className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]"
+                  />
                 ) : (
                   <div className="flex h-full items-center justify-center rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-6">
                     <p className="max-w-sm text-center text-xs text-[var(--color-text-muted)]">

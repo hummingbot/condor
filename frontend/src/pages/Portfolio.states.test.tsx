@@ -1,0 +1,173 @@
+/**
+ * The portfolio header says when it has no answer (FP-10).
+ *
+ * Every tile in the strip read only its query's `data`, so a failed request
+ * folded to `0`, `+$0.00` and "No history data available": an API outage
+ * reading as an idle account with nothing in it. A tile whose query failed
+ * now reads "—" and says what could not be loaded; the history chart says the
+ * load failed and offers to ask again.
+ *
+ * Needs a DOM, so this file overrides vitest's default `node` environment.
+ *
+ * @vitest-environment jsdom
+ */
+
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { MemoryRouter } from "react-router-dom";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { ServerContext } from "@/hooks/useServer";
+
+const calls = vi.hoisted(() => ({
+  getPortfolio: vi.fn(),
+  getBots: vi.fn(),
+  getExecutors: vi.fn(),
+  getExecutorsSummary: vi.fn(),
+  getPortfolioHistory: vi.fn(),
+  getConsolidatedPositions: vi.fn(),
+  getAgents: vi.fn(),
+}));
+
+vi.mock("@/lib/api", () => ({ api: calls }));
+
+vi.mock("@/hooks/useWebSocket", () => ({ useCondorWebSocket: () => {} }));
+vi.mock("@/hooks/useLpPositions", () => ({
+  useLpPositions: () => ({ positions: [], label: "", isLoading: false }),
+}));
+vi.mock("@/hooks/useRates", () => ({
+  useRates: () => ({
+    convert: (value: number) => ({ value, converted: true }),
+    formatValueDetailed: (v: number) => String(v),
+    formatPnlValue: (v: number) => String(v),
+    resolvedSymbol: "$",
+  }),
+}));
+vi.mock("@/components/portfolio/PositionsTab", () => ({ PositionsTab: () => null }));
+
+const { Portfolio } = await import("./Portfolio");
+
+declare global {
+  var IS_REACT_ACT_ENVIRONMENT: boolean;
+}
+
+let container: HTMLDivElement;
+let root: Root;
+
+async function render() {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  await act(async () => {
+    root.render(
+      <QueryClientProvider client={qc}>
+        <ServerContext.Provider value={{ server: "s1", setServer: () => {} }}>
+          <MemoryRouter>
+            <Portfolio />
+          </MemoryRouter>
+        </ServerContext.Provider>
+      </QueryClientProvider>,
+    );
+  });
+  for (let i = 0; i < 4; i++) {
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+  }
+}
+
+/** A strip tile's whole text, found by its label. */
+function tile(label: string): string {
+  const el = [...container.querySelectorAll("span")].find((s) => s.textContent === label);
+  if (!el?.parentElement) throw new Error(`no ${label} tile`);
+  return el.parentElement.textContent ?? "";
+}
+
+const history = (...totals: number[]) => ({
+  points: totals.map((total_usd, i) => ({ timestamp: 1_700_000_000 + i * 3600, total_usd })),
+  top_tokens: [],
+});
+
+beforeEach(() => {
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  for (const fn of Object.values(calls)) fn.mockReset();
+  calls.getPortfolio.mockResolvedValue({ total_usd: 120, connectors: [] });
+  calls.getBots.mockResolvedValue({ bots: [{ bot_name: "b1" }], controllers: [] });
+  calls.getExecutors.mockResolvedValue([]);
+  calls.getExecutorsSummary.mockResolvedValue({ count: 3, pnl: 5, volume: 900, converted: true });
+  calls.getPortfolioHistory.mockResolvedValue(history(100, 110));
+  calls.getConsolidatedPositions.mockResolvedValue({ executor_positions: [], bot_positions: [] });
+  calls.getAgents.mockResolvedValue([]);
+  container = document.createElement("div");
+  document.body.appendChild(container);
+  root = createRoot(container);
+});
+
+afterEach(async () => {
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+describe("Portfolio strip, when a tile's request fails", () => {
+  it("reads normally when everything answers", async () => {
+    await render();
+
+    expect(tile("Bots")).toContain("1");
+    expect(tile("Bots")).toContain("0 controllers");
+    expect(tile("Executors")).toContain("0 active");
+    expect(tile("Executors")).toContain("3 in 1W");
+    expect(tile("Agents")).toContain("0 total");
+  });
+
+  it("does not report zero bots when the bots request failed", async () => {
+    calls.getBots.mockRejectedValue(new Error("down"));
+    await render();
+
+    expect(tile("Bots")).toContain("—");
+    expect(tile("Bots")).toContain("Could not load bots");
+    expect(tile("Bots")).not.toContain("0 controllers");
+  });
+
+  it("says the period summary failed instead of loading for ever", async () => {
+    calls.getExecutorsSummary.mockRejectedValue(new Error("down"));
+    await render();
+
+    expect(tile("Executors")).toContain("Could not load 1W");
+    expect(tile("Executors")).not.toContain("Loading");
+  });
+
+  it("does not report zero active executors or zero agents on a failure", async () => {
+    calls.getExecutors.mockRejectedValue(new Error("down"));
+    calls.getAgents.mockRejectedValue(new Error("down"));
+    await render();
+
+    expect(tile("Executors")).not.toContain("0 active");
+    expect(tile("Agents")).toContain("Could not load agents");
+  });
+});
+
+describe("Portfolio history chart", () => {
+  it("says the load failed, with Retry, instead of 'No history data available'", async () => {
+    calls.getPortfolioHistory.mockRejectedValue(new Error("down"));
+    await render();
+
+    const state = container.querySelector<HTMLElement>('[data-chart-state="error"]');
+    expect(state?.textContent).toContain("Could not load portfolio history");
+    expect(container.textContent).not.toContain("No history data available");
+
+    calls.getPortfolioHistory.mockResolvedValue(history(100, 110));
+    const before = calls.getPortfolioHistory.mock.calls.length;
+    await act(async () => {
+      state!.querySelector("button")!.click();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(calls.getPortfolioHistory.mock.calls.length).toBeGreaterThan(before);
+  });
+
+  it("still says there is no history when the request answers with none", async () => {
+    calls.getPortfolioHistory.mockResolvedValue(history());
+    await render();
+
+    expect(container.textContent).toContain("No history data available");
+    expect(container.querySelector('[data-chart-state="error"]')).toBeNull();
+  });
+});
