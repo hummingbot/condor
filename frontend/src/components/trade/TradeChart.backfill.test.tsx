@@ -43,6 +43,9 @@ const CANDLES = [
 const store = vi.hoisted(() => ({
   mergeCandles: vi.fn(),
   setDuration: vi.fn(),
+  /** What the channel holds, and whether its feed has gone quiet. */
+  candles: [] as { timestamp: number; open: number; high: number; low: number; close: number; volume: number }[],
+  isStale: false,
 }));
 
 const apiState = vi.hoisted(() => ({
@@ -51,8 +54,8 @@ const apiState = vi.hoisted(() => ({
 
 vi.mock("@/hooks/useCandleStore", () => ({
   useCandleStore: () => ({
-    candles: [],
-    isStale: false,
+    candles: store.candles,
+    isStale: store.isStale,
     mergeCandles: store.mergeCandles,
     setDuration: store.setDuration,
   }),
@@ -168,6 +171,8 @@ beforeEach(() => {
   chartDouble.reset({ toPrice: () => 100 });
   store.mergeCandles.mockClear();
   store.setDuration.mockClear();
+  store.candles = [];
+  store.isStale = false;
   apiState.getCandles.mockReset();
   apiState.getCandles.mockResolvedValue(CANDLES);
   container = document.createElement("div");
@@ -266,5 +271,76 @@ describe("TradeChart range vs the candle budget", () => {
 
     expect(store.setDuration).toHaveBeenLastCalledWith(30 * DAY);
     expect(container.querySelector("[data-range-clamped]")).toBeNull();
+  });
+});
+
+/**
+ * The chart says what state its feed is in (FP-05).
+ *
+ * "No candles for this market", "the history request failed", "still loading"
+ * and "the feed stopped" all used to be the same pane: an empty chart, or a
+ * chart that looked live. The signals existed — the backfill's outcome, the
+ * store's staleness timer — and were thrown away.
+ */
+describe("TradeChart feed state", () => {
+  const feed = () => container.querySelector<HTMLElement>("[data-feed-state]");
+  const retryButton = () =>
+    [...container.querySelectorAll("button")].find((b) => b.textContent?.trim() === "Retry");
+
+  it("says it is loading until the history request answers", async () => {
+    apiState.getCandles.mockReturnValue(new Promise(() => {}));
+    await render(false);
+
+    expect(feed()?.dataset.feedState).toBe("loading");
+    expect(feed()?.textContent).toContain("Loading candles");
+  });
+
+  it("says there are no candles when the request answers with none", async () => {
+    apiState.getCandles.mockResolvedValue([]);
+    await render(false);
+
+    expect(feed()?.dataset.feedState).toBe("empty");
+    expect(feed()?.textContent).toContain("No 1m candles for BTC-USDT");
+  });
+
+  it("shows an error with Retry after three failed requests, and Retry asks again", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    apiState.getCandles.mockRejectedValue(new Error("upstream down"));
+    await act(async () => {
+      root.render(<TradeChart {...PROPS} />);
+    });
+    // Three tries, 2 s and 4 s apart.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(7000);
+    });
+
+    expect(apiState.getCandles).toHaveBeenCalledTimes(3);
+    expect(feed()?.dataset.feedState).toBe("error");
+    expect(feed()?.textContent).toContain("Could not load candles");
+
+    apiState.getCandles.mockResolvedValue([]);
+    await act(async () => {
+      retryButton()!.click();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(apiState.getCandles).toHaveBeenCalledTimes(4);
+    expect(feed()?.dataset.feedState).toBe("empty");
+  });
+
+  it("flags a stalled feed over a chart that has candles", async () => {
+    store.candles = CANDLES;
+    store.isStale = true;
+    await render(false);
+
+    expect(feed()?.dataset.feedState).toBe("stale");
+    expect(feed()?.textContent).toContain("Feed stalled");
+  });
+
+  it("says nothing over a live chart", async () => {
+    store.candles = CANDLES;
+    await render(false);
+
+    expect(feed()).toBeNull();
   });
 });

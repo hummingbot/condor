@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 
 import { useCandleStore } from "@/hooks/useCandleStore";
@@ -10,6 +10,7 @@ import { createOverlayTooltipView, getExecutorColor, type ExecutorOverlay } from
 import { getThemeColors, pnlHexColor } from "@/lib/theme-colors";
 import { roundToPricePrecision } from "@/lib/formatters";
 import { keptLookbackSeconds } from "@/lib/gridExecutor";
+import { queryClient } from "@/lib/queryClient";
 import { createDragHitPrimitive, type DragTarget } from "./priceLineDrag";
 import { usePriceLineDrag } from "./usePriceLineDrag";
 
@@ -250,7 +251,7 @@ export function TradeChart({
   });
 
   // ── Candle data from the singleton store (WS live + cached) ──
-  const { candles: storedCandles, mergeCandles, setDuration } = useCandleStore(
+  const { candles: storedCandles, isStale, mergeCandles, setDuration } = useCandleStore(
     server,
     connector,
     pair,
@@ -295,7 +296,14 @@ export function TradeChart({
   // effect twice — the first cleanup throws the in-flight fetch away, and a ref
   // that outlives the remount would make the second pass a no-op, leaving the
   // chart with no history at all.
+  //
+  // How it went is kept, because "no candles", "the request failed" and "still
+  // asking" all used to look like the same empty pane.
+  const [backfill, setBackfill] = useState<"loading" | "done" | "failed">("loading");
+  // Bumped by Retry: the one way to re-run the effect with nothing else changed.
+  const [retryNonce, setRetryNonce] = useState(0);
   useEffect(() => {
+    setBackfill("loading");
     // Asked for, and kept, only as far back as the candle budget reaches at
     // this interval: a longer request downloads history the store would evict
     // on arrival. The pages step the interval up so this rarely clamps; when
@@ -310,18 +318,54 @@ export function TradeChart({
       api
         .getCandles(server, connector, pair, interval, 5000, startTime, undefined, poolAddress)
         .then((fetched) => {
-          if (!cancelled && fetched?.length) mergeCandles(fetched);
+          if (cancelled) return;
+          if (fetched?.length) mergeCandles(fetched);
+          setBackfill("done");
         })
         .catch(() => {
-          if (!cancelled && attempt < 2) {
+          if (cancelled) return;
+          if (attempt < 2) {
             setTimeout(() => fetchWithRetry(attempt + 1), 2000 * (attempt + 1));
+          } else {
+            setBackfill("failed");
           }
         });
     };
     fetchWithRetry(0);
 
     return () => { cancelled = true; };
-  }, [server, connector, pair, interval, poolAddress, keptSeconds]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [server, connector, pair, interval, poolAddress, keptSeconds, retryNonce]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── What the stream last said about this channel ──
+  // `shared-socket` files the backend's stream error under this key and until
+  // now nothing read it. Read off the cache directly rather than through a
+  // query hook: there is nothing to fetch, only a value to follow.
+  const streamError = useSyncExternalStore(
+    useCallback((onChange: () => void) => queryClient.getQueryCache().subscribe(onChange), []),
+    () => {
+      const status = queryClient.getQueryData<{ status: string; message?: string }>([
+        "candles-status", server, connector, pair, interval,
+      ]);
+      return status?.status === "error" ? (status.message ?? "Unknown error") : null;
+    },
+  );
+
+  // ── One answer to "what is this chart showing?" ──
+  //   loading — nothing to draw yet and the history request is still out
+  //   error   — the history request failed (three tries) or the stream errored
+  //   empty   — the request came back and there are no candles for this market
+  //   stale   — candles are drawn, but the feed has stopped delivering
+  //   live    — the normal chart, which says nothing
+  const hasCandles = storedCandles.length > 0;
+  const feedState: "loading" | "error" | "empty" | "stale" | "live" =
+    backfill === "failed" || (streamError && !hasCandles)
+      ? "error"
+      : !hasCandles
+        ? backfill === "loading" ? "loading" : "empty"
+        : isStale
+          ? "stale"
+          : "live";
+  const retryFeed = () => setRetryNonce((n) => n + 1);
 
   // ── Initialize chart ONCE ──
   useEffect(() => {
@@ -1210,6 +1254,56 @@ export function TradeChart({
           >
             Showing the last {formatSpan(keptSeconds)} of {formatSpan(lookbackSeconds)} at {interval} — pick a
             coarser interval for the full range
+          </div>
+        )}
+        {/* Feed state — the chart alone cannot tell "nothing here" from "not
+            yet" from "broken" from "stopped". With no candles the pane says
+            which; with candles drawn it stays out of the way, as a chip. */}
+        {feedState !== "live" && !hasCandles && (
+          <div
+            data-feed-state={feedState}
+            role="status"
+            className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 text-xs text-[var(--color-text-muted)]"
+          >
+            {feedState === "loading" && <span>Loading candles…</span>}
+            {feedState === "empty" && (
+              <span>
+                No {interval} candles for {pair} on {connector}
+              </span>
+            )}
+            {feedState === "error" && (
+              <>
+                <span className="text-[var(--color-red)]">
+                  {streamError && backfill !== "failed"
+                    ? `Candle stream error: ${streamError}`
+                    : "Could not load candles"}
+                </span>
+                <button
+                  onClick={retryFeed}
+                  className="pointer-events-auto rounded border border-[var(--color-border)] px-2 py-0.5 text-[11px] text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
+                >
+                  Retry
+                </button>
+              </>
+            )}
+          </div>
+        )}
+        {(feedState === "stale" || (feedState === "error" && hasCandles)) && (
+          <div
+            data-feed-state={feedState}
+            role="status"
+            className="absolute right-16 top-2 z-10 flex items-center gap-2 rounded border border-[var(--color-yellow)]/40 bg-[var(--color-surface)]/90 px-2 py-0.5 text-[10px] text-[var(--color-yellow)]"
+          >
+            {feedState === "stale" ? (
+              <span>Feed stalled — prices may be out of date</span>
+            ) : (
+              <>
+                <span>History could not be loaded</span>
+                <button onClick={retryFeed} className="underline underline-offset-2 hover:no-underline">
+                  Retry
+                </button>
+              </>
+            )}
           </div>
         )}
         {/* Measure box overlay — pure DOM, never touches chart series */}
