@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 import aiohttp
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -130,6 +131,19 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Compress JSON on the way out (XC-11 / WS-07): the larger lists and the
+    # backtest payloads otherwise cross the tailnet raw. Registered *before*
+    # the telemetry tap below, so it sits inside it: the tap is a
+    # ``BaseHTTPMiddleware``, which re-emits every response as a stream, and a
+    # compressor outside it can no longer see a body's size — it would gzip
+    # every 20-byte answer and ``minimum_size`` would mean nothing.
+    # ``text/event-stream`` is on Starlette's default exclusion list and passes
+    # through untouched — the session prompt stream must reach the browser
+    # event by event — and that is pinned by ``tests/test_web_gzip.py`` rather
+    # than trusted, since it is a default of the installed version and not a
+    # setting made here.
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
 
     # Usage telemetry (FEAT-023). Reports the matched route *template*
     # (`/api/v1/bots/{name}`), never the URL, so cardinality is bounded by our
