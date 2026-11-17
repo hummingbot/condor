@@ -42,8 +42,10 @@ function ServerProvider({ children }: { children: React.ReactNode }) {
     () => localStorage.getItem(SERVER_KEY),
   );
   const handleSetServer = useCallback(
-    (next: string) => {
-      localStorage.setItem(SERVER_KEY, next);
+    (next: string | null) => {
+      // `null` is the selection being dropped: the server it named is gone.
+      if (next === null) localStorage.removeItem(SERVER_KEY);
+      else localStorage.setItem(SERVER_KEY, next);
       setServer(next);
       // Only the two servers involved are touched, and nothing is refetched
       // here: `AppShell` renders `<Outlet key={server}>`, so the switch already
