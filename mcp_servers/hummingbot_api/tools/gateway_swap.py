@@ -15,9 +15,18 @@ from condor.swap_watch import SwapResolveUnsupported
 from condor.swap_watch import resolve as resolve_stuck_swap
 from condor.swap_watch import watch
 from mcp_servers.hummingbot_api.exceptions import ToolError
+from mcp_servers.hummingbot_api.middleware import sent_write
 from mcp_servers.hummingbot_api.schemas import GatewaySwapRequest
 
 logger = logging.getLogger("hummingbot-mcp")
+
+
+#: The read that settles a swap whose submit was never answered.
+_SWAP_CHECK = (
+    "call search_swaps(trading_pair={pair!r}) and look for a new row (a swap "
+    "still SUBMITTED counts: it was signed), and read the wallet balance with "
+    "get_portfolio_overview"
+)
 
 
 def _rows(result: Any) -> list[dict[str, Any]]:
@@ -135,20 +144,24 @@ async def manage_gateway_swaps(
                 f"Invalid trading_pair format. Expected 'BASE-QUOTE', got '{request.trading_pair}'"
             )
 
-        result = await client.gateway_swap.execute_swap(
-            connector=request.connector,
-            network=request.network,
-            trading_pair=request.trading_pair,
-            side=request.side,
-            amount=Decimal(request.amount),
-            # None -> SDK omits it and the connector's configured slippage applies
-            slippage_pct=(
-                Decimal(request.slippage_pct)
-                if request.slippage_pct is not None
-                else None
+        result = await sent_write(
+            client.gateway_swap.execute_swap(
+                connector=request.connector,
+                network=request.network,
+                trading_pair=request.trading_pair,
+                side=request.side,
+                amount=Decimal(request.amount),
+                # None -> SDK omits it and the connector's configured slippage applies
+                slippage_pct=(
+                    Decimal(request.slippage_pct)
+                    if request.slippage_pct is not None
+                    else None
+                ),
+                wallet_address=request.wallet_address,
+                extra_params=request.extra_params,
             ),
-            wallet_address=request.wallet_address,
-            extra_params=request.extra_params,
+            what=f"the {request.side} swap of {request.amount} on {request.trading_pair}",
+            check=_SWAP_CHECK.format(pair=request.trading_pair),
         )
 
         return {
@@ -181,14 +194,18 @@ async def manage_gateway_swaps(
                 "filed under the pair and size it was for."
             )
 
-        result = await client.gateway_swap.execute_quote(
-            connector=request.connector,
-            network=request.network,
-            quote_id=request.quote_id,
-            trading_pair=request.trading_pair,
-            side=request.side,
-            amount=Decimal(request.amount),
-            wallet_address=request.wallet_address,
+        result = await sent_write(
+            client.gateway_swap.execute_quote(
+                connector=request.connector,
+                network=request.network,
+                quote_id=request.quote_id,
+                trading_pair=request.trading_pair,
+                side=request.side,
+                amount=Decimal(request.amount),
+                wallet_address=request.wallet_address,
+            ),
+            what=f"the swap for quote {request.quote_id}",
+            check=_SWAP_CHECK.format(pair=request.trading_pair),
         )
 
         return {

@@ -32,6 +32,86 @@ GATEWAY_LOG_HINT = (
 )
 
 
+#: HTTP statuses a proxy answers with when the request went upstream and the
+#: answer never came back. The write may have landed.
+_UNKNOWN_OUTCOME_STATUSES = frozenset({502, 504})
+
+
+def is_outcome_unknown(exc: BaseException) -> bool:
+    """True when a request was (or may have been) SENT and no answer arrived.
+
+    A timeout, a dropped connection mid-response, a truncated body, a proxy
+    502/504. For a write that spends money this is not a failure: the backend
+    may have acted. A connection that was never established
+    (``ClientConnectorError``) is the opposite case — nothing was sent — and
+    stays an ordinary error.
+    """
+    import asyncio
+
+    import aiohttp
+
+    if isinstance(exc, aiohttp.ClientConnectorError):
+        return False
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return True
+    if isinstance(exc, aiohttp.ClientResponseError):
+        return exc.status in _UNKNOWN_OUTCOME_STATUSES
+    return isinstance(
+        exc,
+        (
+            aiohttp.ServerDisconnectedError,
+            aiohttp.ClientPayloadError,
+            aiohttp.ClientOSError,
+        ),
+    )
+
+
+def describe_error(exc: BaseException) -> str:
+    """``str(exc)``, or the exception's type when that is empty.
+
+    aiohttp's total timeout raises a bare ``TimeoutError`` whose text is empty,
+    which rendered as ``"Error creating position_executor: "`` — a blank error
+    for the one failure the caller most needs described.
+    """
+    return str(exc).strip() or type(exc).__name__
+
+
+def outcome_unknown_message(what: str, check: str, exc: BaseException) -> str:
+    """The text for a write whose request was sent and never answered.
+
+    ``what`` names the write ("the position_executor create"); ``check`` is the
+    read that settles it. No spend path here has an idempotency key, so the
+    message leads with the instruction that matters: do not send it again.
+    """
+    from mcp_servers.hummingbot_api.settings import settings
+
+    if isinstance(exc, (TimeoutError,)):
+        cause = f"no answer arrived within {settings.connection_timeout:g}s"
+    else:
+        cause = f"the connection failed before an answer arrived ({type(exc).__name__})"
+    return (
+        f"OUTCOME UNKNOWN: {what} was sent to the API but {cause}. It MAY HAVE "
+        "SUCCEEDED — funds may already have moved. Do NOT retry this call: a "
+        f"retry can execute it a second time. First {check}. Only if that shows "
+        "nothing after a minute may it be sent again; if in doubt, tell the user."
+    )
+
+
+async def sent_write(awaitable: Any, *, what: str, check: str) -> Any:
+    """Await a fund-moving request; turn "no answer" into OUTCOME UNKNOWN.
+
+    Wrap only the request itself, after validation: everything raised before
+    the send is an ordinary error and must stay one.
+    """
+    try:
+        return await awaitable
+    except Exception as exc:
+        if is_outcome_unknown(exc):
+            logger.error("%s: outcome unknown (%r)", what, exc)
+            raise ToolError(outcome_unknown_message(what, check, exc)) from exc
+        raise
+
+
 def handle_errors(
     action_name: str,
     error_suffix: str = "",
@@ -77,8 +157,10 @@ def handle_errors(
                 raise
             except Exception as e:
                 _count(func.__name__, venue, e)
-                logger.error(f"{action_name} failed: {str(e)}", exc_info=True)
-                raise ToolError(f"Failed to {action_name}: {str(e)}{error_suffix}")
+                logger.error(f"{action_name} failed: {e!r}", exc_info=True)
+                raise ToolError(
+                    f"Failed to {action_name}: {describe_error(e)}{error_suffix}"
+                )
             _count(func.__name__, venue, None)
             return result
 

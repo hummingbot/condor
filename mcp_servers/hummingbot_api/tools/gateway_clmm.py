@@ -18,6 +18,7 @@ from typing import Any
 
 from mcp_servers.hummingbot_api.exceptions import ToolError
 from mcp_servers.hummingbot_api.formatters.base import format_number, get_field
+from mcp_servers.hummingbot_api.middleware import sent_write
 from mcp_servers.hummingbot_api.schemas import CLMMRequest, GatewayCLMMRequest
 
 logger = logging.getLogger("hummingbot-mcp")
@@ -235,6 +236,14 @@ def _normalize_connector(connector: str) -> str:
     return name
 
 
+def _clmm_check(connector: str, network: str) -> str:
+    return (
+        f"call manage_clmm(action='position_info', connector={connector!r}, "
+        f"network={network!r}) to list the wallet's positions and compare them "
+        "with what it held before"
+    )
+
+
 async def manage_clmm_impl(client: Any, request: CLMMRequest) -> dict[str, Any]:
     """Validate per-action and dispatch to client.gateway_clmm.*."""
     # Progressive disclosure: no action → load the guide.
@@ -286,17 +295,21 @@ async def manage_clmm_impl(client: Any, request: CLMMRequest) -> dict[str, Any]:
             raise ToolError(
                 "open requires base_token_amount, quote_token_amount, or both"
             )
-        result = await gc.open_position(
-            connector=connector,
-            network=net,
-            pool_address=request.pool_address,
-            lower_price=_dec(request.lower_price, "lower_price"),
-            upper_price=_dec(request.upper_price, "upper_price"),
-            base_token_amount=_opt_dec(request.base_token_amount),
-            quote_token_amount=_opt_dec(request.quote_token_amount),
-            slippage_pct=_opt_dec(request.slippage_pct),
-            wallet_address=request.wallet_address,
-            extra_params=request.extra_params,
+        result = await sent_write(
+            gc.open_position(
+                connector=connector,
+                network=net,
+                pool_address=request.pool_address,
+                lower_price=_dec(request.lower_price, "lower_price"),
+                upper_price=_dec(request.upper_price, "upper_price"),
+                base_token_amount=_opt_dec(request.base_token_amount),
+                quote_token_amount=_opt_dec(request.quote_token_amount),
+                slippage_pct=_opt_dec(request.slippage_pct),
+                wallet_address=request.wallet_address,
+                extra_params=request.extra_params,
+            ),
+            what=f"the {connector} CLMM {action}",
+            check=_clmm_check(connector, net),
         )
 
     elif action == "add_liquidity":
@@ -305,61 +318,81 @@ async def manage_clmm_impl(client: Any, request: CLMMRequest) -> dict[str, Any]:
             raise ToolError(
                 "add_liquidity requires base_token_amount, quote_token_amount, or both"
             )
-        result = await gc.add_liquidity(
-            connector=connector,
-            network=net,
-            position_address=request.position_address,
-            base_token_amount=_opt_dec(request.base_token_amount),
-            quote_token_amount=_opt_dec(request.quote_token_amount),
-            slippage_pct=_opt_dec(request.slippage_pct),
-            wallet_address=request.wallet_address,
-            extra_params=request.extra_params,
+        result = await sent_write(
+            gc.add_liquidity(
+                connector=connector,
+                network=net,
+                position_address=request.position_address,
+                base_token_amount=_opt_dec(request.base_token_amount),
+                quote_token_amount=_opt_dec(request.quote_token_amount),
+                slippage_pct=_opt_dec(request.slippage_pct),
+                wallet_address=request.wallet_address,
+                extra_params=request.extra_params,
+            ),
+            what=f"the {connector} CLMM {action}",
+            check=_clmm_check(connector, net),
         )
 
     elif action == "remove_liquidity":
         _require_clmm(request, "position_address", "percentage_to_remove")
-        result = await gc.remove_liquidity(
-            connector=connector,
-            network=net,
-            position_address=request.position_address,
-            percentage_to_remove=_dec(
-                request.percentage_to_remove, "percentage_to_remove"
+        result = await sent_write(
+            gc.remove_liquidity(
+                connector=connector,
+                network=net,
+                position_address=request.position_address,
+                percentage_to_remove=_dec(
+                    request.percentage_to_remove, "percentage_to_remove"
+                ),
+                slippage_pct=_opt_dec(request.slippage_pct),
+                wallet_address=request.wallet_address,
             ),
-            slippage_pct=_opt_dec(request.slippage_pct),
-            wallet_address=request.wallet_address,
+            what=f"the {connector} CLMM {action}",
+            check=_clmm_check(connector, net),
         )
 
     elif action == "close":
         _require_clmm(request, "position_address")
-        result = await gc.close_position(
-            connector=connector,
-            network=net,
-            position_address=request.position_address,
-            pool_address=request.pool_address,
-            wallet_address=request.wallet_address,
+        result = await sent_write(
+            gc.close_position(
+                connector=connector,
+                network=net,
+                position_address=request.position_address,
+                pool_address=request.pool_address,
+                wallet_address=request.wallet_address,
+            ),
+            what=f"the {connector} CLMM {action}",
+            check=_clmm_check(connector, net),
         )
 
     elif action == "collect_fees":
         _require_clmm(request, "position_address")
-        result = await gc.collect_fees(
-            connector=connector,
-            network=net,
-            position_address=request.position_address,
-            pool_address=request.pool_address,
-            wallet_address=request.wallet_address,
+        result = await sent_write(
+            gc.collect_fees(
+                connector=connector,
+                network=net,
+                position_address=request.position_address,
+                pool_address=request.pool_address,
+                wallet_address=request.wallet_address,
+            ),
+            what=f"the {connector} CLMM {action}",
+            check=_clmm_check(connector, net),
         )
 
     elif action == "create_pool":
         _require_clmm(request, "base_token", "quote_token")
-        result = await gc.create_pool(
-            connector=connector,
-            network=net,
-            base_token=request.base_token,
-            quote_token=request.quote_token,
-            # None -> hapi/gateway fetch the market price
-            initial_price=_opt_dec(request.initial_price),
-            wallet_address=request.wallet_address,
-            extra_params=request.extra_params,
+        result = await sent_write(
+            gc.create_pool(
+                connector=connector,
+                network=net,
+                base_token=request.base_token,
+                quote_token=request.quote_token,
+                # None -> hapi/gateway fetch the market price
+                initial_price=_opt_dec(request.initial_price),
+                wallet_address=request.wallet_address,
+                extra_params=request.extra_params,
+            ),
+            what=f"the {connector} CLMM {action}",
+            check=_clmm_check(connector, net),
         )
 
     else:

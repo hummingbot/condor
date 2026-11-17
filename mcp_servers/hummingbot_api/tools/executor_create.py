@@ -35,6 +35,11 @@ from typing import Any
 
 from mcp_servers.hummingbot_api.executor_preferences import executor_preferences
 from mcp_servers.hummingbot_api.hummingbot_client import trading_rules_cache
+from mcp_servers.hummingbot_api.middleware import (
+    describe_error,
+    is_outcome_unknown,
+    outcome_unknown_message,
+)
 
 logger = logging.getLogger("hummingbot-mcp")
 
@@ -450,11 +455,33 @@ async def create_executor(
             controller_id=tag,
         )
     except Exception as exc:
+        if is_outcome_unknown(exc):
+            # The POST left this process and no answer came back. The executor
+            # may exist and may be trading; an "Error creating" here is what
+            # invites the retry that opens the position twice.
+            pair = merged_config.get("trading_pair")
+            error = outcome_unknown_message(
+                f"the {executor_type} create",
+                f"call list_executors(controller_ids=[{tag!r}], "
+                f"trading_pairs=[{pair!r}]) and look for a new {executor_type}",
+                exc,
+            )
+            logger.error("create_%s: outcome unknown (%r)", executor_type, exc)
+            return {
+                "action": "create",
+                "executor_type": executor_type,
+                "outcome_unknown": True,
+                "error": error,
+                "formatted_output": f"{error}{defaults_note}",
+            }
+        reason = describe_error(exc)
         return {
             "action": "create",
             "executor_type": executor_type,
-            "error": str(exc),
-            "formatted_output": f"Error creating {executor_type}: {exc}",
+            "error": reason,
+            "formatted_output": (
+                f"Error creating {executor_type}: {reason}{defaults_note}"
+            ),
         }
 
     saved: dict[str, Any] = {}
