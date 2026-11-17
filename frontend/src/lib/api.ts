@@ -53,14 +53,83 @@ export function reportUnauthorized(): Promise<boolean> {
 /** The login routes answer 401 for a bad login, not for a dead session. */
 const AUTH_ROUTE_PREFIX = "/api/v1/auth/";
 
-async function apiFetch<T>(path: string, init?: RequestInit, retried = false): Promise<T> {
+/**
+ * How long a request may take before it is abandoned (FD-05).
+ *
+ * `fetch` has no timeout of its own, so a hung upstream used to leave a query
+ * fetching — and holding one of the browser's six connections to the host —
+ * for as long as the socket stayed up. Reads are cut at 30 s: nothing on a
+ * page is still worth waiting for after that, and the query layer retries.
+ *
+ * Writes get a ceiling rather than a deadline. Abandoning a request does not
+ * undo it on the server, and several of them are legitimately slow (an image
+ * pull, a deploy), so the limit only exists to end a spinner that would
+ * otherwise never stop. A call that knows better passes `timeoutMs`.
+ */
+const READ_TIMEOUT_MS = 30_000;
+const WRITE_TIMEOUT_MS = 600_000;
+
+/** `RequestInit`, plus a per-call override of the default timeout. */
+type ApiInit = RequestInit & { timeoutMs?: number };
+
+/**
+ * An abort signal that fires when `ms` elapse or the caller's own signal does.
+ *
+ * Hand-rolled instead of `AbortSignal.any([signal, AbortSignal.timeout(ms)])`:
+ * `AbortSignal.any` is missing from browsers older than early 2024, and a
+ * plain timer is the same few lines with nothing to feature-detect.
+ */
+function requestDeadline(outer: AbortSignal | null | undefined, ms: number) {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, ms);
+  const onAbort = () => controller.abort(outer?.reason);
+  if (outer?.aborted) onAbort();
+  else outer?.addEventListener("abort", onAbort, { once: true });
+  return {
+    signal: controller.signal,
+    timedOut: () => timedOut,
+    clear: () => {
+      clearTimeout(timer);
+      outer?.removeEventListener("abort", onAbort);
+    },
+  };
+}
+
+async function apiFetch<T>(path: string, init?: ApiInit, retried = false): Promise<T> {
+  const { timeoutMs, ...request } = init ?? {};
   const auth = authHeaders();
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...auth,
-    ...(init?.headers as Record<string, string>),
+    ...(request.headers as Record<string, string>),
   };
-  const res = await fetch(path, { ...init, headers });
+  const isRead = (request.method ?? "GET").toUpperCase() === "GET";
+  const ms = timeoutMs ?? (isRead ? READ_TIMEOUT_MS : WRITE_TIMEOUT_MS);
+  const deadline = requestDeadline(request.signal, ms);
+  let res: Response;
+  let body: unknown;
+  try {
+    res = await fetch(path, { ...request, headers, signal: deadline.signal });
+    // Read inside the deadline: a response whose body never finishes hangs
+    // just as a request that is never answered does.
+    body = res.ok ? await res.json() : await res.json().catch(() => ({}));
+  } catch (error) {
+    if (!deadline.timedOut()) throw error;
+    throw Object.assign(
+      new Error(
+        isRead
+          ? `Request timed out after ${Math.round(ms / 1000)}s`
+          : `No answer after ${Math.round(ms / 1000)}s. The request may still have been applied — check before retrying.`,
+      ),
+      { name: "TimeoutError" },
+    );
+  } finally {
+    deadline.clear();
+  }
   if (res.status === 401 && !retried && auth.Authorization && !path.startsWith(AUTH_ROUTE_PREFIX)) {
     // A token that changed while this request was in flight means another
     // request already went through the handler: retry on the new session
@@ -72,7 +141,7 @@ async function apiFetch<T>(path: string, init?: RequestInit, retried = false): P
     if (renewed) return apiFetch<T>(path, init, true);
   }
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
+    const err = body as { detail?: string };
     // The status rides along on the Error so a caller can tell apart failures that
     // read the same as a message but call for different things from the operator —
     // a 501 from the API-settings routes means "this server is older than this
@@ -85,7 +154,7 @@ async function apiFetch<T>(path: string, init?: RequestInit, retried = false): P
       body: err,
     });
   }
-  return res.json();
+  return body as T;
 }
 
 /** The HTTP status of a failed `apiFetch`, when the thrown value carries one. */
