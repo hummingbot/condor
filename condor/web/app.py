@@ -159,8 +159,28 @@ def create_app() -> FastAPI:
     # never the exception's own text, which carries the backend address.
     @app.exception_handler(ConnectionError)
     @app.exception_handler(aiohttp.ClientConnectionError)
+    #
+    # ``ConnectionError`` is also the base of ``BrokenPipeError`` and
+    # ``ConnectionResetError``, which code that never touches a trading server
+    # can raise, and nothing here can tell those apart from a reset on the
+    # backend connection -- so the registered types stay as wide as they are
+    # (narrowing reopens the bare 500) and the traceback is always logged:
+    # this handler replaces the one place an unhandled error would have left
+    # one. Anything but the two shapes ``get_client`` raises is logged as an
+    # error, since it may be a bug answered as "unreachable".
     async def upstream_unreachable(request: Request, exc: Exception):
-        log.warning("Upstream unreachable on %s: %s", request.url.path, exc)
+        expected = type(exc) is ConnectionError or isinstance(
+            exc, aiohttp.ClientConnectionError
+        )
+        log.log(
+            logging.WARNING if expected else logging.ERROR,
+            "%s on %s %s, answered as upstream unreachable: %r",
+            "Upstream unreachable" if expected else "Unexpected connection error",
+            request.method,
+            request.url.path,
+            exc,
+            exc_info=exc,
+        )
         err = upstream_error("Cannot connect to server", exc)
         return JSONResponse(status_code=err.status_code, content={"detail": err.detail})
 

@@ -171,6 +171,45 @@ def test_the_app_turns_a_stray_connection_error_into_the_same_502(real_app, make
     assert BACKEND_HOST not in res.text
 
 
+def _raise_from_a_helper(exc):
+    raise exc
+
+
+@pytest.mark.parametrize(
+    "make_exc,level",
+    [
+        (_ttl_error, "WARNING"),
+        (_transport_error, "WARNING"),
+        # Not what get_client raises: possibly nothing to do with a trading
+        # server at all, so it is an error in the log, not a routine warning.
+        (lambda: BrokenPipeError(32, "Broken pipe"), "ERROR"),
+        (lambda: ConnectionResetError(54, "Connection reset by peer"), "ERROR"),
+    ],
+)
+def test_the_backstop_logs_the_traceback_it_swallows(real_app, caplog, make_exc, level):
+    """Review R8: the handler replaced the bare 500 -- and with it the only
+    traceback an unrelated BrokenPipeError / ConnectionResetError ever left."""
+
+    @real_app.get("/api/v1/_r8_probe")
+    async def _probe():
+        _raise_from_a_helper(make_exc())
+
+    real_app.router.routes.insert(0, real_app.router.routes.pop())
+
+    with caplog.at_level("WARNING", logger="condor.web.app"):
+        res = TestClient(real_app, raise_server_exceptions=False).get(
+            "/api/v1/_r8_probe"
+        )
+
+    assert res.status_code == 502  # still never a bare 500
+    assert BACKEND_HOST not in res.text
+    records = [r for r in caplog.records if r.name == "condor.web.app"]
+    assert len(records) == 1
+    assert records[0].levelname == level
+    assert records[0].exc_info is not None
+    assert "_raise_from_a_helper" in caplog.text  # the frame that raised it
+
+
 def test_the_backstop_covers_an_unconverted_executors_route(real_app, monkeypatch):
     """``executors.py`` still awaits ``get_client`` outside its ``try``."""
     import condor.web.routes.executors as executors_module
