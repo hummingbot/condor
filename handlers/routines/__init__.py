@@ -26,6 +26,7 @@ import condor.reports
 from condor import primitives, routine_hooks
 from condor.preferences import SERVER_PIN_KEY, get_active_server, set_active_server
 from condor.routine_store import _agent_of, get_routine_store
+from condor.runtime import code_guard
 from handlers import clear_all_input_states
 from routines.base import (
     discover_routines,
@@ -500,11 +501,22 @@ async def _execute_routine(
                 source_name=routine_name,
             ),
             primitives.bind_context(context),
+            # The same two guards the store runner applies (XC-04): the
+            # run_code policy, and exit() as an error rather than a shutdown —
+            # asyncio re-raises SystemExit straight out of the event loop.
+            code_guard.guarded(code_guard.routine_scope(instance_id)),
+            code_guard.contain_exit(),
         ):
             config = routine.config_class(**config_dict)
             raw_result = await routine.run_fn(config, context)
         rich_result = normalize_result(raw_result)
         result_text = rich_result.text[:500] if rich_result.text else "Completed"
+    except code_guard.CodeRunDeadline as e:
+        # A BaseException: left to propagate it would skip the bookkeeping
+        # below and take the job callback down with it.
+        result_text = f"Error: CodeRunDeadline: {e}"
+        rich_result = None
+        logger.warning(f"Routine {routine_name}[{instance_id}] interrupted: {e}")
     except Exception as e:
         result_text = f"Error: {e}"
         rich_result = None
@@ -611,6 +623,10 @@ async def _run_continuous_routine(
                 source_name=routine_name,
             ),
             primitives.bind_context(context),
+            # Guarded like every other runner (XC-04): a continuous routine
+            # calling exit() must end itself, not Condor.
+            code_guard.guarded(code_guard.routine_scope(instance_id)),
+            code_guard.contain_exit(),
         ):
             config = routine.config_class(**config_dict)
             result = await routine.run_fn(config, context)
