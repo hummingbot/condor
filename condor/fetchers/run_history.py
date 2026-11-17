@@ -642,6 +642,7 @@ async def _build(
         identities[controller_id] = {"connector": connector, "trading_pair": pair}
 
     source = "snapshots"
+    archive_degraded = False
     if not controllers and db_path:
         # The snapshot table has a retention floor, and this run started before
         # it. The archived database is the only record left of what it did, and
@@ -649,7 +650,9 @@ async def _build(
         # is a run-level trade walk, not a per-controller sampled series, so it
         # is emphatically the fallback and is labelled as one all the way to the
         # notice under the chart.
-        controllers, identities = await _from_archive(client, server, db_path)
+        controllers, identities, archive_degraded = await _from_archive(
+            client, server, db_path
+        )
         source = "archive"
 
     if not controllers:
@@ -666,8 +669,10 @@ async def _build(
 
     # Written only once the run can no longer change. A run served live here is
     # simply not stored, and the next reader pays the walk again — which is the
-    # right trade against an immutable entry that is wrong for ever.
-    if is_settled(stopped_at):
+    # right trade against an immutable entry that is wrong for ever. The same
+    # goes for an archive curve computed from a degraded read: the archived-run
+    # cache lets that one expire, and copying it here would make it permanent.
+    if is_settled(stopped_at) and not archive_degraded:
         get_run_history_store().put(
             key,
             RunHistoryEntry(
@@ -734,8 +739,13 @@ ARCHIVE_SERIES_ID = "(run)"
 
 async def _from_archive(
     client: Any, server: str, db_path: str
-) -> tuple[dict[str, list[list[float]]], dict[str, dict[str, str]]]:
+) -> tuple[dict[str, list[list[float]]], dict[str, dict[str, str]], bool]:
     """One run's curve out of its archived sqlite, or nothing.
+
+    The third element says the curve is *degraded*: left in the run's own
+    currency because its quote could not be priced, or computed by an archive
+    read whose trade walk or executor fetch failed. It is worth drawing and
+    must not be persisted.
 
     Weaker than the snapshot series in three ways the caller has to keep saying
     out loud: it is per *run* rather than per controller, it has no unrealized
@@ -743,15 +753,20 @@ async def _from_archive(
     volume series. That is what the archive records, and stating it is better
     than drawing a fabricated split.
     """
-    from condor.fetchers.archived_run import ArchivedRunUnavailable, fetch_archived_run
+    from condor.fetchers.archived_run import (
+        ArchivedRunUnavailable,
+        fetch_archived_run,
+        run_is_degraded,
+    )
 
     try:
         perf = await fetch_archived_run(client, server, db_path)
     except ArchivedRunUnavailable:
-        return {}, {}
+        return {}, {}, False
     except Exception:
         logger.warning("Archived fallback failed for %s", db_path, exc_info=True)
-        return {}, {}
+        return {}, {}, False
+    degraded = not perf.converted or run_is_degraded(server, db_path)
 
     points = [
         [float(p.timestamp) * 1000, float(p.pnl), 0.0, float(p.pnl), 0.0, 0.0]
@@ -759,7 +774,7 @@ async def _from_archive(
         if p.timestamp
     ]
     if not points:
-        return {}, {}
+        return {}, {}, degraded
     points.sort(key=lambda p: p[0])
 
     # ``ArchivedBotPerformance`` already restates its figures in USD when it
@@ -776,4 +791,5 @@ async def _from_archive(
                 "trading_pair": pair,
             }
         },
+        degraded,
     )

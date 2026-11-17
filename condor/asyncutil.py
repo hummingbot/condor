@@ -185,6 +185,15 @@ class SingleFlight:
         """
         self._inflight.clear()
 
+    def forget(self, key: Hashable) -> None:
+        """Stop sharing ``key``'s in-flight task: the next caller starts afresh.
+
+        For a caller that knows the running fetch is already out of date (a
+        cache invalidation). As with :meth:`clear`, the task is left to finish
+        for the waiters already shielded on it.
+        """
+        self._inflight.pop(key, None)
+
     # -- Introspection (tests and log lines; not part of the hot path) --
 
     def __len__(self) -> int:

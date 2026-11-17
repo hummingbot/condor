@@ -203,7 +203,11 @@ async def probe_performance_history(client, **_kw) -> dict:
       is older*, which is a different sentence from "there is no data".
     * **unknown** — the server did not answer at all. Reporting that as
       unsupported would pin a fallback to a server that is merely down and keep
-      it there for the whole TTL after the server came back.
+      it there for the whole TTL after the server came back. So this one is
+      *raised*, never returned: a returned dict is a successful fetch as far as
+      SDS is concerned and would be cached for the full 30 minutes, whatever
+      it says inside. Raising leaves nothing cached, the next chart asks
+      again, and the capability route maps the missing answer to ``unknown``.
     """
     try:
         await fetch_performance_history(
@@ -213,9 +217,5 @@ async def probe_performance_history(client, **_kw) -> dict:
         return {"supported": False, "detail": str(e)}
     except Exception as e:
         logger.debug("Performance-history probe did not complete: %s", e)
-        return {
-            "supported": False,
-            "unknown": True,
-            "detail": "the server did not answer",
-        }
+        raise
     return {"supported": True}
