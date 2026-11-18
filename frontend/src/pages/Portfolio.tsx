@@ -875,11 +875,17 @@ export function Portfolio() {
     for (const pos of holds) {
       quotes.add(pos.trading_pair?.split("-")[1] || "USDT");
     }
+    // The liquidity table's money is quote-denominated too (SOL on an X-SOL
+    // range); without its quote here the row falls back to the quote's symbol.
+    for (const pos of lpPositions) {
+      quotes.add(pos.quote);
+    }
     return Array.from(quotes);
-  }, [controllers, executorsList, holds]);
+  }, [controllers, executorsList, holds, lpPositions]);
   const {
     convert,
     formatValueDetailed,
+    formatFeeValue,
     formatPnlValue,
     resolvedSymbol: currencySymbol,
   } = useRates(quoteCurrencies);
@@ -1084,6 +1090,7 @@ export function Portfolio() {
           convert={convert}
           formatValue={formatValueDetailed}
           formatPnlValue={formatPnlValue}
+          formatFeeValue={formatFeeValue}
         />
       </div>
     </div>

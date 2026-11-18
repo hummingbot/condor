@@ -130,6 +130,9 @@ export function DexPool() {
     queryFn: () => api.getDexPoolByAddress(server!, address, network),
     enabled: !!server && !!network && !!address,
     staleTime: 60 * 1000,
+    // The range bar multiplies by this pool's quote price, so the page must
+    // follow it rather than freeze at the price it was opened on.
+    refetchInterval: 60 * 1000,
   });
 
   // Registering the pool's tokens with Gateway is part of opening the pool, not
@@ -351,7 +354,11 @@ export function DexPool() {
     );
   }
 
-  if (poolError || !pool) {
+  // Only a page with nothing to show falls back to the error view. A failed
+  // refresh keeps the last good pool: the polling timer makes an occasional
+  // rate limit or network blip likely, and trading away an open chart over it
+  // is worse than showing a price one interval old.
+  if (!pool) {
     // A pool that could not be *read* is not a pool that does not exist: the
     // route answers 503 with a reason when GeckoTerminal refused, and retrying
     // in a few seconds is the fix — not walking back to the browser.
@@ -534,6 +541,7 @@ export function DexPool() {
           <LpPositionBar
             executors={executors}
             currentPrice={currentPrice}
+            quoteUsd={pool.quote_token_price_usd ?? null}
             selectedExecutorId={selectedExecutorId}
             onSelect={(id) => setSelectedExecutorId((prev) => (prev === id ? null : id))}
           />
