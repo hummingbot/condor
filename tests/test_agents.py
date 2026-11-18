@@ -113,6 +113,74 @@ def test_agent_crud_roundtrip(tmp_path, monkeypatch):
     assert store.get("river_maker") is None
 
 
+def test_deleting_an_agent_clears_routines_consent_and_mutes(tmp_path, monkeypatch):
+    """CORR-1134: deleting an agent must not leave its routines, consent
+    record or mutes behind for a later agent at the same slug to inherit."""
+    from condor.agents import code_trust
+    from condor.memory.mutes import mutes_path, set_muted
+    from routines.base import assistant_routines_dir
+
+    _patch_roots(monkeypatch, tmp_path)
+    store = AgentStore()
+    store.create(name="River Maker", description="d")
+
+    routine_path = assistant_routines_dir("river_maker") / "scanner.py"
+    routine_path.parent.mkdir(parents=True, exist_ok=True)
+    routine_path.write_text("async def run(config, context):\n    return 'ok'\n")
+    code_trust.arm("river_maker")
+    code_trust.allow("river_maker", "scanner", routine_path.read_text())
+    set_muted("river_maker", "routines", "scanner", True)
+
+    assert store.delete("river_maker") is True
+
+    assert not routine_path.exists()
+    assert not code_trust.trust_path("river_maker").exists()
+    assert not mutes_path("river_maker").exists()
+
+    # A new agent at the same slug starts genuinely clean — nothing of the
+    # deleted one's routines, consent or mutes carries over.
+    store.create(name="River Maker", description="d2")
+    assert not routine_path.exists()
+    assert not code_trust.trust_path("river_maker").exists()
+    assert not mutes_path("river_maker").exists()
+    assert code_trust.allowed("river_maker", "scanner", "anything") is True
+
+
+def test_delete_routine_clears_its_own_consent_and_mute_entry(tmp_path, monkeypatch):
+    """CORR-1134: deleting one routine (not the whole agent) must also drop
+    its code_trust.yml consent entry and its mute, not just its file — else
+    a routine of the same name created later reads as pre-allowed, or stays
+    silently muted for no visible reason. A sibling routine's own consent is
+    untouched."""
+    from condor.agents import code_trust
+    from condor.memory.mutes import is_muted, set_muted
+    from mcp_servers.condor.tools import routines as routine_tools
+    from routines.base import assistant_routines_dir
+
+    _patch_roots(monkeypatch, tmp_path)
+    AgentStore().create(name="River Maker", description="d")
+
+    routines_dir = assistant_routines_dir("river_maker")
+    routines_dir.mkdir(parents=True, exist_ok=True)
+    routine_path = routines_dir / "scanner.py"
+    routine_path.write_text("async def run(config, context):\n    return 'ok'\n")
+    other_path = routines_dir / "other.py"
+    other_path.write_text("async def run(config, context):\n    return 'ok'\n")
+    code_trust.arm("river_maker")
+    code_trust.allow("river_maker", "scanner", routine_path.read_text())
+    code_trust.allow("river_maker", "other", other_path.read_text())
+    set_muted("river_maker", "routines", "scanner", True)
+
+    result = routine_tools.delete_routine("scanner", "river_maker")
+
+    assert result == {"deleted": True, "name": "scanner"}
+    assert not routine_path.exists()
+    trust = code_trust.load("river_maker")
+    assert "scanner" not in trust.routines
+    assert "other" in trust.routines
+    assert is_muted("river_maker", "routines", "scanner") is False
+
+
 # ── Strategy as an Agent sub-resource ──
 
 
@@ -276,6 +344,43 @@ def test_create_strategy_requires_existing_agent(tmp_path, monkeypatch):
         instructions="x",
     )
     assert "error" in result and "not found" in result["error"].lower()
+
+
+def test_update_strategy_config_takes_effect_over_a_saved_config_yml(
+    tmp_path, monkeypatch
+):
+    """Review on PR #334: ``manage_loops(update, config=...)`` whole-replaced
+    ``default_config`` (``loop.md``), which a saved ``config.yml`` always
+    overrides (``load_full_config``) — so for any loop whose config was ever
+    saved from the dashboard, the chat-approved write was a silent no-op. It
+    must land in the *effective* config instead, merged, same as the
+    dashboard's own ``update_strategy_config`` route."""
+    from condor.agents.config import load_full_config, save_full_config
+    from mcp_servers.condor.tools import trading_agent as ta
+
+    _patch_roots(monkeypatch, tmp_path)
+    _write_agent(tmp_path, "mm", name="MM", agent_key="claude-code")
+    strategy = StrategyStore().create(
+        agent_slug="mm",
+        name="Grid",
+        instructions="tick",
+        default_config={"frequency_sec": 300, "max_pairs": 3},
+    )
+    # The dashboard saved a runtime override, as `update_strategy_config` does.
+    save_full_config(
+        strategy.home,
+        load_full_config(strategy.home, {"frequency_sec": 1800, "max_pairs": 3}),
+    )
+
+    result = ta.manage_loops(
+        action="update", loop_id=strategy.key, config={"frequency_sec": 600}
+    )
+
+    assert result == {"updated": True, "loop_id": strategy.key, "name": "Grid"}
+    effective = load_full_config(strategy.home, strategy.default_config)
+    assert effective["frequency_sec"] == 600
+    # The rest of the saved config.yml survives the merge.
+    assert effective["max_pairs"] == 3
 
 
 def test_routines_dir_resolves_bare_agent_slug(tmp_path, monkeypatch):

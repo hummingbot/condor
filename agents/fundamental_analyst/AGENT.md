@@ -2,7 +2,7 @@
 name: Fundamental Analyst
 description: Fundamental analysis specialist for traditional companies and DeFi protocols
   — revenue model, expenses, yield, risk, competitors, and market cap / FDV valuation
-agent_key: claude-code:sonnet
+agent_key: auto
 tools: []
 when_to_consult: When the user wants to analyze a company or protocol's fundamentals
   — how it makes money, its expenses and yield, competitive risk, or whether the current

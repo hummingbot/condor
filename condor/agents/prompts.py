@@ -453,10 +453,12 @@ def build_tick_prompt(
     """
     from condor.acp.pydantic_ai_client import is_pydantic_ai_model
 
+    from .engine import resolve_agent_key
+
     execution_mode = config.get("execution_mode", "loop")
     is_dry_run = execution_mode == "dry_run"
     is_experiment = is_experiment_mode(execution_mode)
-    agent_key = config.get("agent_key") or strategy.agent_key or agent.agent_key
+    agent_key = resolve_agent_key(config, strategy, agent)
     use_pydantic_ai = is_pydantic_ai_model(agent_key)
 
     # Controller mode: the agent steers a named bot's controllers instead of
@@ -587,7 +589,12 @@ def build_tick_prompt(
     }
     config_lines = [
         "[CURRENT CONFIG]",
-        "These are the ACTIVE values for this session. If the loop instructions mention different defaults, IGNORE them and use these values instead.",
+        "These are the ACTIVE values for this session, read from the same config.yml "
+        "the preflight check already verified against. A loop written to read "
+        "trading_requirements and total_amount_quote from here is already describing "
+        "these values, not a different set to override — treat any literal venue, "
+        "pair or amount still written into the loop's own prose as a stale example "
+        "and use these values instead.",
     ]
     for k, v in config.items():
         if k in _CONFIG_EXCLUDE:

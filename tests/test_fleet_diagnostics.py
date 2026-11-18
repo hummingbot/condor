@@ -44,24 +44,27 @@ def _row(executor_id, status, controller_id, **over):
 
 
 def test_the_host_reading_divides_load_by_the_cores_it_has(monkeypatch):
-    # Pinned rather than read off the real host: the ratio is taken from the
-    # unrounded load and each field is rounded on its own, so re-deriving one
-    # from the other misses by a rounding step on an unlucky load (1.1847 on 4
-    # vCPUs reads 1.18 and 0.296, not 1.18 / 4 = 0.295).
+    # Pinned rather than read off the real host. load_per_vcpu derives from
+    # the already-rounded load_1m (diagnostics.py), so the quotient is
+    # 1.18 / 4 = 0.295, not the raw 1.1847 / 4 = 0.296 you'd get re-dividing
+    # the unrounded reading.
     #
-    # CORR-1085: this exact fully-mocked input reads 0.296 on every local run
-    # but 0.295 on GitHub Actions' ubuntu-latest, with no code or environment
-    # difference found yet that explains it. Tolerating either rounding path
-    # keeps the test from pinning CI red on an unexplained platform
-    # difference, while still failing on a reading that isn't close to
-    # load_1m / vcpus at all.
+    # CORR-1085: this test used to assert the raw-division value (0.296) and
+    # failed on GitHub Actions' ubuntu-latest with 0.295, which looked like a
+    # platform-dependent divergence. It wasn't one: `b0d33e06` had already
+    # fixed host_load() to derive load_per_vcpu from the same rounded load_1m
+    # it reports, making the quotient deterministic everywhere — the local
+    # repro that still produced 0.296 was running a checkout that predated
+    # that fix, not a genuine CI/local difference. Pinning the exact
+    # deterministic value (rather than tolerating both) is what actually
+    # guards against the raw-vs-rounded bug recurring.
     monkeypatch.setattr("os.getloadavg", lambda: (1.1847, 1.0, 1.0))
     monkeypatch.setattr("os.cpu_count", lambda: 4)
     reading = host_load()
     assert reading["available"] is True
     assert reading["load_1m"] == 1.18
     assert reading["vcpus"] == 4
-    assert reading["load_per_vcpu"] == pytest.approx(1.1847 / 4, abs=0.0015)
+    assert reading["load_per_vcpu"] == 0.295
 
 
 def test_the_real_host_has_a_reading():
@@ -70,16 +73,10 @@ def test_the_real_host_has_a_reading():
     assert reading["available"] is True
     assert reading["vcpus"] > 0
 
-    # The two fields are rounded differently, and the tolerance has to allow for
-    # it: ``load_1m`` is the raw average to 2dp, while ``load_per_vcpu`` divides
-    # the RAW average and rounds to 3dp. So recomputing from the published
-    # ``load_1m`` carries up to 0.005/vcpus of error from that first rounding,
-    # plus 0.0005 from the second.
-    #
-    # A flat 1e-3 therefore failed on any host with fewer than five cores —
-    # 0.005/4 = 0.00125 — which is every standard CI runner, while passing on a
-    # developer box with 8+. It read as flaky and was arithmetic.
-    tolerance = 0.005 / reading["vcpus"] + 0.0005
+    # load_per_vcpu divides the already-rounded load_1m (diagnostics.py), so
+    # recomputing it from the published load_1m carries only the final 3dp
+    # rounding step, not a second independent one.
+    tolerance = 0.0005 + 1e-9
     assert reading["load_per_vcpu"] == pytest.approx(
         reading["load_1m"] / reading["vcpus"], abs=tolerance
     )

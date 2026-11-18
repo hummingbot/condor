@@ -8,3 +8,22 @@
 if (typeof Element !== "undefined" && !Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = function scrollIntoView() {};
 }
+
+// Same gap, a different API: `useTheme` reads `window.matchMedia` at module
+// top level (`let currentTheme = getStoredTheme()`), so any test file whose
+// module graph reaches it — anything importing `CodeEditor`, directly or
+// through `StrategyConfigEditor`/the import review step (FEAT-202) — throws
+// before a single test runs, with no stack trace pointing at the test's own
+// code. Stubbed once here rather than per file, same reasoning as above.
+if (typeof window !== "undefined" && !window.matchMedia) {
+  window.matchMedia = ((media: string) => ({
+    matches: false,
+    media,
+    onchange: null,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    addListener: () => {},
+    removeListener: () => {},
+    dispatchEvent: () => false,
+  })) as unknown as typeof window.matchMedia;
+}

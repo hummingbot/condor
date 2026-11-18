@@ -133,8 +133,9 @@ This is why "it came back on the wrong server" was hard to reason about. One `se
 1. **The start request** — `config` in the `POST /agents/{slug}/strategies/{sslug}/start` body (the Start-session form, `control_agent(start)`, a delegation). Persisted to `sessions/session_N/config.yml` and nowhere else, which is why a restart that only re-read the strategy config lost it.
 2. **The strategy's saved `config.yml`** — `agents/{slug}/loops/{sslug}/config.yml`, what the config editor writes.
 3. **The strategy's `loop.md` frontmatter** — `default_config:`, and `agent_key:` for the model.
-4. **The Agent's `AGENT.md` frontmatter** — `agent_key:`, the Agent's default model for every playbook it owns.
+4. **The Agent's `AGENT.md` frontmatter** — `agent_key:`, the Agent's default model for every playbook it owns. Every bundled agent ships with `agent_key: auto` (CORR-1160): resolved at this point, not stored as a literal, it defers to place 6 below instead of naming a backend — so a clean install with only one model family configured still starts every bundled agent, with no `AGENT.md` edit. Set a real key here instead of `auto` to pin that one Agent regardless of the install default; that edit forks the file to the local, gitignored agent root on first write (`condor.layering.fork_if_stock`), so a later `condor update` — a plain fast-forward merge of the tracked tree — never touches or reverts it.
 5. **The `AgentConfig` field default** — `server_name: "local"`, `agent_key: ""` (meaning "the runtime's default model"). An unresolvable *inherited* server name is not an error: the engine falls through to the owner's accessible servers.
+6. **The install-wide default** — `CONDOR_DEFAULT_AGENT`, or the chat Agent's own pinned `agent_key` if that is unset (`condor.llm.options._default_agent`). What `auto` in place 4 resolves to.
 
 A sixth copy is written, never read as a source of truth: `status.json` next to the session journal carries a `pins` snapshot, rewritten every tick, and that is what `_restart` reads first (falling back to `sessions/session_N/config.yml` for sessions recorded before the snapshot existed).
 

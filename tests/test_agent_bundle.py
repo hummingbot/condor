@@ -371,13 +371,18 @@ def test_the_reserved_default_slug_is_refused(traveller):
     assert import_plan.collision == "condor"
 
 
-def test_a_deleted_slug_with_leftover_skills_is_not_a_collision(traveller):
+def test_deleting_an_agent_clears_its_whole_home_and_a_reimport_lands_clean(
+    traveller,
+):
+    """CORR-1134: a deleted agent's routines, skills, controllers and loops
+    must not survive to be inherited by a new agent landing at the same
+    slug, so ``delete()`` clears the whole home rather than leaving it
+    behind. Collision is still judged by ``AgentStore.get`` (through both
+    layers), never by directory existence — it just means nothing is left
+    to collide with once delete() has run."""
     bundle = _bundle_for(traveller)
     assert AgentStore().delete("traveller")
-    # AGENT.md is gone but skills/routines/controllers/loops survive the
-    # delete, so the slug directory itself still exists — the reimport
-    # must judge by AgentStore.get, not by that leftover directory.
-    assert agent_home("traveller").exists()
+    assert not agent_home("traveller").exists()
     assert AgentStore().get("traveller") is None
 
     import_plan = ab.plan(bundle, user_id=7)
@@ -391,16 +396,17 @@ def test_a_failed_reimport_into_a_leftover_home_keeps_the_retained_files(
     traveller, monkeypatch
 ):
     """``apply``'s own failure cleanup must not undo what ``_collision``
-    allows: writing into a deleted agent's leftover home (skills/routines/
-    controllers/loops kept on purpose by ``AgentStore.delete``). A failure
-    partway through a reimport there may only remove what *this* import
-    wrote, never the retained content — a bare `shutil.rmtree(home)` would
-    erase it instead."""
+    allows: writing into an already-occupied home whose ``AGENT.md`` is
+    missing — e.g. a previous import into this same slug that itself failed
+    partway. A failure partway through a reimport there may only remove what
+    *this* import wrote, never content that was already there — a bare
+    `shutil.rmtree(home)` would erase it instead."""
     bundle = _bundle_for(traveller)
-    assert AgentStore().delete("traveller")
-    retained = (agent_home("traveller") / "skills" / "s" / "SKILL.md").read_text(
-        "utf-8"
-    )
+    retained = (traveller / "skills" / "s" / "SKILL.md").read_text("utf-8")
+    # Simulate a home with real content but no AGENT.md — what a prior
+    # failed import leaves, since AgentStore.delete() itself now clears the
+    # whole home (CORR-1134) and so never produces this state anymore.
+    (traveller / "AGENT.md").unlink()
 
     import_plan = ab.plan(bundle, user_id=7)
     monkeypatch.setattr(
