@@ -27,6 +27,23 @@ from mcp_servers.hummingbot_api.formatters.executors import (
 logger = logging.getLogger("hummingbot-mcp")
 
 
+async def _executor_rates(client: Any, executors: list[dict[str, Any]]) -> Any:
+    """USD rate per quote across a batch, or ``None`` when unresolvable.
+
+    Executor money fields are quote-denominated; without a rate the formatter
+    keeps them under their own ticker rather than printing a dollar sign.
+    """
+    from condor.fetchers.executors import executor_trading_pair
+    from condor.quote_conversion import quotes_in, resolve_client_usd_rates
+
+    pairs = [executor_trading_pair(ex) for ex in executors if isinstance(ex, dict)]
+    try:
+        return await resolve_client_usd_rates(client, quotes_in(pairs))
+    except Exception as e:
+        logger.warning("Executor USD rates unavailable: %s", e)
+        return None
+
+
 async def list_executors(
     client: Any,
     *,
@@ -56,8 +73,10 @@ async def list_executors(
         if not isinstance(executors, list):
             executors = [executors] if executors else []
 
+        rates = await _executor_rates(client, executors)
+
         formatted = f"Executors Found: {len(executors)}\n\n"
-        formatted += format_executors_table(executors)
+        formatted += format_executors_table(executors, rates)
 
         if isinstance(result, dict) and "next_cursor" in result:
             formatted += f"\n\nNext cursor: {result.get('next_cursor')}"
@@ -139,7 +158,8 @@ async def get_executor(
     """
     try:
         result = await client.executors.get_executor(executor_id)
-        formatted = format_executor_detail(result)
+        rates = await _executor_rates(client, [result])
+        formatted = format_executor_detail(result, rates)
         response: dict[str, Any] = {
             "action": "get",
             "executor_id": executor_id,

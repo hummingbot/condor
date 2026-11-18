@@ -18,6 +18,56 @@ from .base import (
 )
 
 
+def _pnl_applicable(executor: dict[str, Any]) -> bool:
+    """Whether a PnL figure means anything for this executor.
+
+    An ``order_executor`` has no position accounting: its ``net_pnl_quote`` is
+    structurally zero, and printing ``+$0.00`` states break-even where the
+    truth is "not applicable".
+    """
+    from condor.fetchers.executors import get_executor_type
+
+    return get_executor_type(executor) not in ("order", "unknown")
+
+
+def _executor_quote(executor: dict[str, Any]) -> str:
+    """Quote asset the executor's money fields are denominated in."""
+    from condor.fetchers.executors import executor_quote, executor_trading_pair
+
+    return executor_quote(executor_trading_pair(executor))
+
+
+def _money(value: Any, quote: str, rates: Any, *, signed: bool = False) -> str:
+    """A quote-denominated figure, in USD when a rate is available.
+
+    ``rates`` is the :class:`~condor.quote_conversion.QuoteRates` resolved by
+    the tool; absent a path to USD the amount keeps its own quote's ticker
+    rather than wearing a dollar sign (0.0218 SOL is not $0.0218).
+    """
+    from condor.fetchers.market_data import USD_QUOTES
+    from condor.quote_conversion import usd_value
+
+    if value is None or value == "N/A":
+        return "N/A"
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+
+    usd = usd_value(amount, quote, rates) if rates is not None else None
+    if usd is None and quote in USD_QUOTES:
+        usd = amount
+    if usd is not None:
+        # format_currency puts the symbol first, which would render a loss as
+        # "$-0.87"; the sign belongs before it.
+        body = format_currency(abs(usd))
+        if usd < 0:
+            return f"-{body}"
+        return f"{'+' if signed else ''}{body}"
+    tail = f" {quote}" if quote else ""
+    return f"{amount:+,.4f}{tail}" if signed else f"{amount:,.4f}{tail}"
+
+
 def format_executor_types_table(executor_types: list[dict[str, Any]]) -> str:
     """
     Format executor types with descriptions as a table.
@@ -61,7 +111,7 @@ def format_executor_types_table(executor_types: list[dict[str, Any]]) -> str:
     return f"{header}\n{separator}\n" + "\n".join(rows)
 
 
-def format_executors_table(executors: list[dict[str, Any]]) -> str:
+def format_executors_table(executors: list[dict[str, Any]], rates: Any = None) -> str:
     """
     Format a list of executors as a table.
 
@@ -69,6 +119,8 @@ def format_executors_table(executors: list[dict[str, Any]]) -> str:
 
     Args:
         executors: List of executor dictionaries
+        rates: Optional ``QuoteRates``; when given, volume and pnl are
+            restated in USD, otherwise they keep their quote's own ticker.
 
     Returns:
         Formatted table string
@@ -99,16 +151,23 @@ def format_executors_table(executors: list[dict[str, Any]]) -> str:
             side = custom_info.get("side", "") if custom_info else ""
         side = str(side)[:4] if side else ""
 
-        # Volume is filled_amount_quote
-        volume = format_number(
-            get_field(executor, "filled_amount_quote", default=None),
-            decimals=2,
-            compact=True,
+        # Volume and PnL are quote-denominated; state them in USD when the
+        # tool resolved a rate, so rows on different quotes add up.
+        quote = _executor_quote(executor)
+        volume = _money(
+            get_field(executor, "filled_amount_quote", default=None), quote, rates
         )
-        pnl = format_number(
-            get_field(executor, "net_pnl_quote", "pnl", default=None),
-            decimals=2,
-            compact=False,
+        # An order executor has no position to be up or down on; its PnL
+        # fields are zero, and a $0.00 row reads as break-even.
+        pnl = (
+            _money(
+                get_field(executor, "net_pnl_quote", "pnl", default=None),
+                quote,
+                rates,
+                signed=True,
+            )
+            if _pnl_applicable(executor)
+            else "—"
         )
 
         created = format_timestamp(
@@ -121,12 +180,14 @@ def format_executors_table(executors: list[dict[str, Any]]) -> str:
     return f"{header}\n{separator}\n" + "\n".join(rows)
 
 
-def format_executor_detail(executor: dict[str, Any]) -> str:
+def format_executor_detail(executor: dict[str, Any], rates: Any = None) -> str:
     """
     Format a single executor's details in a readable format.
 
     Args:
         executor: Executor dictionary
+        rates: Optional ``QuoteRates``; when given, every money field is
+            restated in USD, otherwise it keeps its quote's own ticker.
 
     Returns:
         Formatted executor detail string
@@ -158,16 +219,18 @@ def format_executor_detail(executor: dict[str, Any]) -> str:
 
     output += "\n"
 
+    quote = _executor_quote(executor)
+
     # Volume info
     volume = get_field(executor, "filled_amount_quote", default=None)
     if volume is not None:
-        output += f"Volume Traded: {format_currency(volume)}\n"
+        output += f"Volume Traded: {_money(volume, quote, rates)}\n"
 
     # Position info from custom_info
     if custom_info:
         position_size = custom_info.get("position_size_quote")
         if position_size is not None:
-            output += f"Position Size: {format_currency(position_size)}\n"
+            output += f"Position Size: {_money(position_size, quote, rates)}\n"
 
         break_even = custom_info.get("break_even_price")
         if break_even is not None:
@@ -187,27 +250,34 @@ def format_executor_detail(executor: dict[str, Any]) -> str:
 
     # PnL info
     net_pnl = get_field(executor, "net_pnl_quote", default=None)
-    if net_pnl is not None and net_pnl != "N/A":
-        output += f"Net PnL (Quote): {format_currency(net_pnl)}\n"
+    if _pnl_applicable(executor):
+        if net_pnl is not None and net_pnl != "N/A":
+            output += f"Net PnL: {_money(net_pnl, quote, rates, signed=True)}\n"
+    else:
+        output += "Net PnL: — (order executors carry no position)\n"
 
     net_pnl_pct = get_field(executor, "net_pnl_pct", default=None)
-    if net_pnl_pct is not None and net_pnl_pct != "N/A":
+    if net_pnl_pct is not None and net_pnl_pct != "N/A" and _pnl_applicable(executor):
         output += f"Net PnL (%): {format_percentage(net_pnl_pct)}\n"
 
     # Realized/Unrealized breakdown from custom_info
     if custom_info:
         realized_pnl = custom_info.get("realized_pnl_quote")
         if realized_pnl is not None:
-            output += f"Realized PnL: {format_currency(realized_pnl)}\n"
+            output += (
+                f"Realized PnL: {_money(realized_pnl, quote, rates, signed=True)}\n"
+            )
 
         position_pnl = custom_info.get("position_pnl_quote")
         if position_pnl is not None:
-            output += f"Unrealized PnL: {format_currency(position_pnl)}\n"
+            output += (
+                f"Unrealized PnL: {_money(position_pnl, quote, rates, signed=True)}\n"
+            )
 
         realized_buy = custom_info.get("realized_buy_size_quote")
         realized_sell = custom_info.get("realized_sell_size_quote")
         if realized_buy is not None and realized_sell is not None:
-            output += f"Buy Volume: {format_currency(realized_buy)} | Sell Volume: {format_currency(realized_sell)}\n"
+            output += f"Buy Volume: {_money(realized_buy, quote, rates)} | Sell Volume: {_money(realized_sell, quote, rates)}\n"
 
     cum_fees = get_field(executor, "cum_fees_quote", default=None)
     if cum_fees is not None and cum_fees != "N/A":

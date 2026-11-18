@@ -15,7 +15,11 @@ walker directly.
 
 import asyncio
 
-from condor.fetchers.executors import EXECUTORS_PAGE_SIZE, fetch_all_executors
+from condor.fetchers.executors import (
+    EXECUTORS_PAGE_SIZE,
+    fetch_all_executors,
+    get_executor_fees,
+)
 
 
 def _page(start, count):
@@ -117,3 +121,23 @@ def test_absent_cursor_ends_the_walk():
 
     assert len(items) == EXECUTORS_PAGE_SIZE
     assert len(client.calls) == 1
+
+
+# ── An LP's fees are its income, not its transaction cost ──
+
+
+def test_lp_fee_income_wins_over_the_transaction_fee():
+    """`cum_fees_quote` on an LP is the tx fee (2.2e-05), not the 0.95 earned."""
+    ex = {"cum_fees_quote": 2.2e-05, "custom_info": {"fees_earned_quote": 0.95}}
+
+    assert get_executor_fees(ex) == 0.95
+
+
+def test_non_lp_executors_keep_cum_fees_quote():
+    assert get_executor_fees({"cum_fees_quote": 1.25}) == 1.25
+
+
+def test_an_unparsable_lp_fee_field_falls_back():
+    ex = {"cum_fees_quote": 0.5, "custom_info": {"fees_earned_quote": "N/A"}}
+
+    assert get_executor_fees(ex) == 0.5

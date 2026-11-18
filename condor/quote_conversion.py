@@ -115,6 +115,39 @@ async def resolve_client_usd_rates(client: Any, quotes: set[str]) -> QuoteRates:
     return await resolve_usd_rates(server, wanted)
 
 
+def usd_value(value: float, quote: str, rates: QuoteRates) -> float | None:
+    """``value`` restated in USD, or ``None`` when the quote has no path.
+
+    ``None`` rather than face value on purpose: the caller labels the amount
+    with its own ticker in that case, so a SOL figure is never mistaken for
+    dollars.
+    """
+    rate = rates.rates.get(quote) if quote else None
+    return value * rate if rate is not None else None
+
+
+def format_quote_money(
+    value: float, quote: str, rates: QuoteRates | None, *, signed: bool = False
+) -> str:
+    """A quote-denominated figure, in USD when a rate exists.
+
+    The display rule the dashboard follows (``frontend/src/lib/rates.ts``):
+    convert and label with ``$`` when the quote has a path to USD; otherwise
+    keep the amount in quote units under the quote's own ticker. A SOL amount
+    behind a ``$`` understates it by the whole SOL/USD rate.
+
+    ``rates=None`` means the caller could not resolve any (no client, no
+    server): the amount is then rendered in its own quote, never as dollars.
+    """
+    usd = usd_value(value, quote, rates) if rates is not None else None
+    if usd is not None:
+        if signed:
+            return f"{'+' if usd >= 0 else '-'}${abs(usd):,.2f}"
+        return f"${usd:,.2f}"
+    tail = f" {quote}" if quote else ""
+    return f"{value:+,.4f}{tail}" if signed else f"{value:,.4f}{tail}"
+
+
 def convert_trades_to_usd(trades: list[dict], rates: QuoteRates) -> int:
     """Restate trade prices and quote-denominated fees in USD, in place.
 

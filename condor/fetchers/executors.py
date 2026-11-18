@@ -159,7 +159,23 @@ def get_executor_volume(executor: Dict[str, Any]) -> float:
 
 
 def get_executor_fees(executor: Dict[str, Any]) -> float:
-    """Extract cumulative fees from an executor response."""
+    """Extract cumulative fees from an executor response.
+
+    An LP executor's fee income lives in ``custom_info.fees_earned_quote``. Its
+    top-level ``cum_fees_quote`` is a different quantity -- the transaction fee
+    (measured on METAx/USDC: 2.2e-05, exactly the custom_info ``tx_fee``) -- so
+    reading it understates an LP's fees by orders of magnitude (0.95 -> 2.2e-05,
+    ~40 000x). Prefer the LP field whenever the executor carries it; every other
+    executor type has no ``fees_earned_quote`` and falls through unchanged.
+    """
+    custom_info = executor.get("custom_info")
+    if isinstance(custom_info, dict):
+        lp_fees = custom_info.get("fees_earned_quote")
+        if lp_fees is not None:
+            try:
+                return float(lp_fees)
+            except (TypeError, ValueError):
+                pass
     for key in ("cum_fees_quote", "fees_quote", "total_fees"):
         val = executor.get(key)
         if val is not None and val != 0:
@@ -459,6 +475,18 @@ def build_executor_row(ex: Dict[str, Any]) -> Dict[str, Any]:
         "custom_info": custom_info,
         "config": config if isinstance(config, dict) else {},
     }
+
+
+def executor_trading_pair(executor: Dict[str, Any]) -> str:
+    """The pair exactly as the API recorded it, from the top level or ``config``.
+
+    Responses put ``trading_pair`` in either place, and the create path writes
+    it into ``config``. Reading only the top level defaults such a row to USDT
+    and prints a SOL amount behind a dollar sign.
+    """
+    config = executor.get("config")
+    cfg = config if isinstance(config, dict) else executor
+    return str(cfg.get("trading_pair") or executor.get("trading_pair") or "")
 
 
 def executor_quote(pair: str) -> str:
