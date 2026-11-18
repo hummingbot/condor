@@ -26,6 +26,17 @@ function Host({ dirty }: { dirty: boolean }) {
     <>
       <button data-dirty onClick={() => guard.onPanelDirtyChange(dirty)} />
       <button data-close onClick={() => guard.openPane(null, then)} />
+      <button
+        data-desk
+        onClick={() =>
+          // What the desk's own showOnly does inside an accepted pick: it asks
+          // for the pane again, in the same breath.
+          guard.openPane({ kind: "desk" }, () => {
+            guard.openPane({ kind: "desk" });
+            then();
+          })
+        }
+      />
       <span data-pane>{pane?.kind ?? "none"}</span>
       {guard.dialog}
     </>
@@ -86,5 +97,17 @@ describe("openPane's then", () => {
     await click(buttonNamed("Cancel"));
     expect(q("[data-pane]").textContent).toBe("agent");
     expect(then).not.toHaveBeenCalled();
+  });
+});
+
+describe("a pane move made inside an accepted change", () => {
+  it("is not asked about a second time", async () => {
+    await act(async () => root.render(<Host dirty />));
+    await click(q("[data-dirty]"));
+    await click(q("[data-desk]"));
+    await click(buttonNamed("Discard"));
+    expect(document.body.textContent).not.toContain("Discard changes?");
+    expect(q("[data-pane]").textContent).toBe("desk");
+    expect(then).toHaveBeenCalledOnce();
   });
 });

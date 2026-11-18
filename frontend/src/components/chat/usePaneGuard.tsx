@@ -84,13 +84,31 @@ export function usePaneGuard({
     { next: PaneView; then?: () => void } | { go: number } | null
   >(null);
 
+  // True while an accepted request's `then` runs: the pane moves it makes are
+  // part of the change the reader already said yes to, and this render's
+  // `pane` and `panelDirty` are still the ones from before the answer.
+  const accepted = useRef(false);
+  const runAccepted = (then?: () => void) => {
+    if (!then) return;
+    accepted.current = true;
+    try {
+      then();
+    } finally {
+      accepted.current = false;
+    }
+  };
+
   const guarded = (next: PaneView, then?: () => void) => {
-    if (panelDirty && paneHandoffDropsPanel(pane, next, panelSlug)) {
+    if (
+      !accepted.current &&
+      panelDirty &&
+      paneHandoffDropsPanel(pane, next, panelSlug)
+    ) {
       setPending({ next, then });
       return;
     }
     apply(next);
-    then?.();
+    runAccepted(then);
   };
   // Handed out under one identity for the life of the host (PERF-393). `pane`
   // is a fresh object on every host render and `apply` a fresh closure, so an
@@ -179,7 +197,7 @@ export function usePaneGuard({
           window.history.go(request.go);
         } else {
           apply(request.next);
-          request.then?.();
+          runAccepted(request.then);
         }
       }}
       onClose={() => setPending(null)}

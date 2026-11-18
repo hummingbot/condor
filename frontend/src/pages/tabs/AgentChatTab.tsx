@@ -849,8 +849,11 @@ export function AgentChatTab() {
   // `then` runs once the pick has happened: a guarded pane can still say no.
   const pickMain = (id: MainSlot, then?: () => void) => {
     if (id === "agent") return openPane({ kind: "agent" }, then);
-    account.showOnly(id);
-    then?.();
+    // The desk takes the pane, so the guard is asked before its sections move.
+    openPane({ kind: "desk" }, () => {
+      account.showOnly(id);
+      then?.();
+    });
   };
   /**
    * Put `id` in the top half: the pane for agent/desk, nothing in it for a side
@@ -858,10 +861,12 @@ export function AgentChatTab() {
    * forgets its sections — otherwise `deskWasOpen` would put the desk back in
    * the top half on the next load, over the Tasks/Routines picked for it.
    */
-  const applyTop = (id: SlotId) => {
-    if (!isSide(id)) return pickMain(id);
-    account.close();
-    openPane(null);
+  const applyTop = (id: SlotId, then?: () => void) => {
+    if (!isSide(id)) return pickMain(id, then);
+    openPane(null, () => {
+      account.close();
+      then?.();
+    });
   };
   /**
    * Bring a remembered split back on arrival. Its picks are restored from
@@ -902,8 +907,7 @@ export function AgentChatTab() {
       layoutMain && layoutSide
         ? layoutSide
         : (["tasks", "portfolio", "agent"] as SlotId[]).find((x) => x !== top)!;
-    applyTop(top);
-    setStack({ top, bottom, dir });
+    applyTop(top, () => setStack({ top, bottom, dir }));
   };
   /**
    * The split as it stands, for a pick to start from. Two panels opened from
@@ -920,18 +924,19 @@ export function AgentChatTab() {
     const cur = currentSplit();
     // Picking what the other half holds swaps them rather than showing one twice.
     const bottom = id === cur.bottom ? cur.top : cur.bottom;
-    applyTop(id);
-    setStack({ top: id, bottom, dir: cur.dir });
+    applyTop(id, () => setStack({ top: id, bottom, dir: cur.dir }));
   };
   const pickStackBottom = (id: SlotId) => {
     if (id !== "agent" && !keepsBelowDraft()) return;
     const cur = currentSplit();
     if (id === cur.top) {
-      applyTop(cur.bottom);
-      setStack({ top: cur.bottom, bottom: id, dir: cur.dir });
+      applyTop(cur.bottom, () =>
+        setStack({ top: cur.bottom, bottom: id, dir: cur.dir }),
+      );
     } else {
-      if (!stackActive) applyTop(cur.top);
-      setStack({ top: cur.top, bottom: id, dir: cur.dir });
+      const split = () => setStack({ top: cur.top, bottom: id, dir: cur.dir });
+      if (stackActive) split();
+      else applyTop(cur.top, split);
     }
   };
   /** Close one half: the other stays, as the one panel beside the chat. */
