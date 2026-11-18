@@ -7,7 +7,7 @@ import { api, type ConsolidatedPosition } from "@/lib/api";
 import { candleChannelKey, candleStore } from "@/lib/candle-store";
 import type { ChartLineSlot, ExtraLine, PickSlot } from "@/components/executor/types";
 import { createOverlayTooltipView, getExecutorColor, type ExecutorOverlay } from "@/lib/executor-overlays";
-import { getThemeColors, pnlHexColor } from "@/lib/theme-colors";
+import { getThemeColors, pnlHexColor, withAlpha } from "@/lib/theme-colors";
 import { roundToPricePrecision } from "@/lib/formatters";
 import { createDragHitPrimitive, type DragTarget } from "./priceLineDrag";
 import { usePriceLineDrag } from "./usePriceLineDrag";
@@ -815,12 +815,8 @@ export function TradeChart({
       const dimAlpha = 0.2;
 
       function applyDim(c: string): string {
-        if (!isDimmed) return c;
-        // Add alpha to hex colors
-        if (c.startsWith("#") && c.length === 7) return c + "33";
-        if (c.startsWith("#") && c.length === 4) return c + "3";
-        if (c.startsWith("rgba")) return c.replace(/[\d.]+\)$/, `${dimAlpha})`);
-        return c;
+        // Hex, rgb() and the theme's hsl() alike.
+        return isDimmed ? withAlpha(c, dimAlpha) : c;
       }
 
       const box = overlay.gridBox;

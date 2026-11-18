@@ -138,6 +138,10 @@ export function Dex() {
   const effectiveQuery =
     source.kind === "gateway" || isSearch ? debouncedQuery : "";
   const isGateway = source.kind === "gateway";
+  // The venue filter narrows the browse lists only. A search looks for one
+  // token or pool wherever it trades, and the filter is hidden while it runs —
+  // sending it anyway emptied results with nothing on screen saying why.
+  const effectiveDexes = isGateway || isSearch ? [] : dexes;
   const enabled =
     !!server &&
     source.kind !== "favorites" &&
@@ -156,7 +160,7 @@ export function Dex() {
         : "favorites",
     isGateway ? "" : network,
     effectiveQuery,
-    isGateway ? "" : dexes.join(","),
+    effectiveDexes.join(","),
   ];
 
   const {
@@ -184,7 +188,7 @@ export function Dex() {
               network,
               view: source.kind === "gecko" ? source.view : "trending",
               query: effectiveQuery || undefined,
-              dexes,
+              dexes: effectiveDexes,
               limit: PAGE_SIZE,
               page,
             },
