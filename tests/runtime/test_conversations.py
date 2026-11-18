@@ -1728,15 +1728,12 @@ def test_archive_and_restore(conv_root):
     assert conversations.get_conversation(42, meta.id).archived is False
 
 
-def test_deleting_an_agent_deletes_only_its_chats(conv_root):
-    mine = conversations.new_conversation(42, "web", agent_slug="quad")
-    other_agent = conversations.new_conversation(42, "web", agent_slug="grid")
-    condor = conversations.new_conversation(42, "web")
-    someone_else = conversations.new_conversation(7, "web", agent_slug="quad")
+def test_a_turn_still_answering_does_not_resurrect_a_deleted_chat(conv_root):
+    meta = new_conversation(USER, WEB)
+    rec = Recorder(USER, meta.id, "still thinking")
+    rec.observe(RuntimeEvent(type="text", data={"text": "half an answer"}))
 
-    assert conversations.delete_for_agent(42, "quad") == 1
-    assert conversations.get_conversation(42, mine.id) is None
-    assert conversations.get_conversation(42, other_agent.id) is not None
-    assert conversations.get_conversation(42, condor.id) is not None
-    # Another user's chats with the same agent are theirs to delete.
-    assert conversations.get_conversation(7, someone_else.id) is not None
+    assert conversations.delete_conversation(USER, meta.id) is True
+    rec.flush()  # the answer ends after the chat is gone
+
+    assert not conversations._conv_dir(USER, meta.id).exists()

@@ -260,3 +260,44 @@ def test_archive_through_the_same_patch(store):
     # Archiving leaves the title alone.
     assert body["title"] == "hello"
     assert conversations.get_conversation(USER.id, meta.id).archived is True
+
+
+# ── Deleting an agent takes its chats, the same way a chat is deleted ──
+
+
+def test_deleting_an_agents_chats_unshares_them_and_spares_the_rest(store, monkeypatch):
+    import asyncio
+
+    from condor.sharing import outbox
+
+    mine = new_conversation(USER.id, "web", agent_slug="quad")
+    conversations.update_meta(
+        USER.id, mine.id, share_id="s-1", share_delete_token="tok"
+    )
+    other_agent = new_conversation(USER.id, "web", agent_slug="grid")
+    someone_else = new_conversation(OTHER_ID, "web", agent_slug="quad")
+
+    destroyed = []
+
+    class _Info:
+        key = "web:111:x"
+        conversation_id = mine.id
+
+    async def list_sessions(user_id=None):
+        return [_Info()] if user_id == USER.id else []
+
+    async def destroy(key):
+        destroyed.append(str(key))
+        return True
+
+    monkeypatch.setattr(routes.runtime, "list_sessions", list_sessions)
+    monkeypatch.setattr(routes.runtime, "destroy", destroy)
+
+    assert asyncio.run(routes.forget_for_agent(USER.id, "quad")) == 1
+    assert conversations.get_conversation(USER.id, mine.id) is None
+    # Unshared before the token went with the directory.
+    assert len(outbox.pending()) == 1
+    # Its live session was stopped rather than left answering into nothing.
+    assert len(destroyed) == 1
+    assert conversations.get_conversation(USER.id, other_agent.id) is not None
+    assert conversations.get_conversation(OTHER_ID, someone_else.id) is not None

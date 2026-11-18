@@ -140,7 +140,17 @@ async def delete_conversation(
     """
     owner_id = _owner(user, user_id)
     _meta_or_404(owner_id, conversation_id)
+    return await forget_conversation(owner_id, conversation_id)
 
+
+async def forget_conversation(owner_id: int, conversation_id: str) -> dict:
+    """Unshare, stop whatever is answering, then delete. The one way a chat goes.
+
+    Shared by the DELETE route and by deleting an agent (which takes its chats
+    with it), so neither can skip the unshare — losing the delete token would
+    leave the shared copy online with nothing able to remove it — or leave a
+    session answering into a directory that no longer exists.
+    """
     unshared = False
     try:
         from condor.sharing import share as sharing
@@ -166,6 +176,22 @@ async def delete_conversation(
         "sessions_destroyed": detached,
         "unshared": unshared,
     }
+
+
+async def forget_for_agent(owner_id: int, agent_slug: str) -> int:
+    """Forget every chat this user had with ``agent_slug``; how many went.
+
+    Called when the agent itself is deleted. Left behind, its chats are bound to
+    a slug nothing answers to and read in the rail as a duplicate agent. Other
+    users' chats with the same agent are theirs to delete.
+    """
+    gone = 0
+    for meta in conversations.list_conversations(
+        owner_id, limit=0, agent_slug=agent_slug
+    ):
+        if (await forget_conversation(owner_id, meta.id))["deleted"]:
+            gone += 1
+    return gone
 
 
 # ── Attachments ──

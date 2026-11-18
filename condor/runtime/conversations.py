@@ -904,26 +904,17 @@ def set_archived(user_id: int, conv_id: str, archived: bool) -> bool:
     return update_meta(user_id, conv_id, archived=bool(archived))
 
 
-def delete_for_agent(user_id: int, agent_slug: str) -> int:
-    """Delete every conversation this user had with ``agent_slug``; how many went.
-
-    Called when the agent itself is deleted. Its chats used to stay behind,
-    bound to a slug nothing answers to any more, and pile up in the rail as
-    groups that looked like duplicate agents. Deleting the agent is the
-    deliberate act; its conversations go with it.
-    """
-    gone = 0
-    for meta in list_conversations(user_id, limit=0, agent_slug=agent_slug):
-        if delete_conversation(user_id, meta.id):
-            gone += 1
-    return gone
-
-
 def delete_conversation(user_id: int, conv_id: str) -> bool:
     """Remove a conversation and its transcript. The only destructive verb."""
     conv_dir = _conv_dir(user_id, conv_id)
     if not conv_dir.is_dir():
         return False
+    # A turn still unwinding would flush after this and recreate the directory
+    # as a transcript with no meta, which no list shows. It has nowhere to go.
+    for recorder in list(_live_recorders):
+        if recorder.user_id == user_id and recorder.conv_id == conv_id:
+            recorder.enabled = False
+            _live_recorders.discard(recorder)
     shutil.rmtree(conv_dir, ignore_errors=True)
     return not conv_dir.exists()
 

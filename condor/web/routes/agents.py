@@ -3078,14 +3078,13 @@ async def delete_agent(slug: str, user: WebUser = Depends(get_current_user)):
         # has always refused it; unhandled here that refusal reached the browser
         # as a 500, which reads as a broken server rather than a rule.
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    # The deleter's chats with it go too: left behind they are bound to a slug
-    # nothing answers to, and read in the rail as a duplicate of some agent.
-    # Other users' chats are theirs to delete.
+    # The deleter's chats with it go too, through the same path as deleting a
+    # chat by hand: unshared first, live sessions stopped, then removed.
     chats_deleted = 0
     try:
-        from condor.runtime import conversations
+        from condor.web.routes.conversations import forget_for_agent
 
-        chats_deleted = conversations.delete_for_agent(user.id, slug)
+        chats_deleted = await forget_for_agent(user.id, slug)
     except Exception:  # noqa: BLE001 - the agent is gone; cleanup must not undo that
         log.warning("Could not delete conversations for agent %s", slug, exc_info=True)
     return {"deleted": True, "chats_deleted": chats_deleted}
