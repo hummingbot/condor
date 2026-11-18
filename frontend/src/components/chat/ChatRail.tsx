@@ -82,6 +82,7 @@ export const ChatRail = memo(function ChatRail({
   onTalk,
   onNew,
   onOpenConversation,
+  onDeletedConversation,
 }: {
   agents: AgentSummary[];
   /** Delegations running anywhere, for the live strip's count. */
@@ -110,6 +111,8 @@ export const ChatRail = memo(function ChatRail({
   /** A new conversation with whoever is selected. */
   onNew: () => void;
   onOpenConversation: (meta: ConversationMeta) => void;
+  /** A chat was deleted from the rail; whatever still holds it on screen lets go. */
+  onDeletedConversation?: (id: string) => void;
 }) {
   const [expanded, setExpanded] = useState(readOpen);
 
@@ -264,6 +267,7 @@ export const ChatRail = memo(function ChatRail({
         busyIds={busyIds}
         waitingIds={waitingIds}
         liveDrafts={liveDrafts}
+        onDeleted={onDeletedConversation}
         activeId={activeId}
         onOpen={(meta) => {
           onClose();

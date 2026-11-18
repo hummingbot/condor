@@ -1737,3 +1737,19 @@ def test_a_turn_still_answering_does_not_resurrect_a_deleted_chat(conv_root):
     rec.flush()  # the answer ends after the chat is gone
 
     assert not conversations._conv_dir(USER, meta.id).exists()
+
+
+def test_closing_a_tab_mid_first_answer_keeps_the_chat(conv_root):
+    meta = new_conversation(USER, WEB)
+    rec = Recorder(USER, meta.id, "first question")
+    rec.observe(RuntimeEvent(type="text", data={"text": "still answering"}))
+
+    # The meta reads empty until the recorder flushes; that is not "empty".
+    assert conversations.discard_if_empty(USER, meta.id) is False
+    rec.flush()
+    assert conversations.get_conversation(USER, meta.id).turn_count == 2
+
+
+def test_a_chat_closed_without_a_word_is_still_discarded(conv_root):
+    meta = new_conversation(USER, WEB)
+    assert conversations.discard_if_empty(USER, meta.id) is True

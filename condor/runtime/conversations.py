@@ -536,6 +536,13 @@ def discard_if_empty(user_id: int, conv_id: str) -> bool:
     meta = get_conversation(user_id, conv_id)
     if meta is None or not is_empty(meta):
         return False
+    # A first answer still being recorded has not written its turns yet, so the
+    # meta reads empty. Closing the tab must not erase it: the turn lands when
+    # the recorder flushes, and then it is a conversation.
+    if any(
+        r.user_id == user_id and r.conv_id == conv_id for r in list(_live_recorders)
+    ):
+        return False
     return delete_conversation(user_id, conv_id)
 
 

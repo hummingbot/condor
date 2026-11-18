@@ -107,6 +107,7 @@ export const ConversationList = memo(function ConversationList({
   liveDrafts,
   activeId,
   onOpen,
+  onDeleted,
   renderAgent,
 }: {
   /** The registry, Condor included (`CHAT_SLUG`). */
@@ -119,6 +120,8 @@ export const ConversationList = memo(function ConversationList({
   liveDrafts?: ConversationMeta[];
   activeId: string | null;
   onOpen: (meta: ConversationMeta) => void;
+  /** After the server deleted a chat, so its session on screen can be closed. */
+  onDeleted?: (id: string) => void;
   renderAgent: (header: AgentGroupHeader) => ReactNode;
 }) {
   const queryClient = useQueryClient();
@@ -152,12 +155,15 @@ export const ConversationList = memo(function ConversationList({
     queryFn: () => api.listConversations(),
     refetchOnMount: "always",
   });
+  // Deleted here, so never brought back as a draft by a session on screen that
+  // has not closed yet.
+  const [deletedIds, setDeletedIds] = useState<Set<string>>(() => new Set());
   const conversations = useMemo(() => {
     if (!liveDrafts?.length) return saved;
     const have = new Set(saved.map((c) => c.id));
-    const extra = liveDrafts.filter((d) => !have.has(d.id));
+    const extra = liveDrafts.filter((d) => !have.has(d.id) && !deletedIds.has(d.id));
     return extra.length ? [...extra, ...saved] : saved;
-  }, [saved, liveDrafts]);
+  }, [saved, liveDrafts, deletedIds]);
 
   // Rows the server has not listed yet are live drafts: a chat still starting
   // has only a temporary id, and Rename, Share, Archive or Delete sent with it
@@ -192,7 +198,11 @@ export const ConversationList = memo(function ConversationList({
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => api.deleteConversation(id),
-    onSuccess: invalidate,
+    onSuccess: (_r, id) => {
+      setDeletedIds((prev) => new Set(prev).add(id));
+      onDeleted?.(id);
+      return invalidate();
+    },
   });
 
   const commitRename = (id: string) => {

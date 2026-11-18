@@ -66,6 +66,7 @@ async function render(props: {
   waitingIds?: Set<string>;
   busyIds?: Set<string>;
   liveDrafts?: ConversationMeta[];
+  onDeleted?: (id: string) => void;
 }) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   await act(async () => {
@@ -126,5 +127,33 @@ describe("a chat the server has not listed yet", () => {
     expect(draft.querySelector('[title="Delete"]')).toBeNull();
     expect(draft.querySelector('[title="Rename"]')).toBeNull();
     expect(saved.querySelector('[title="Delete"]')).not.toBeNull();
+  });
+});
+
+describe("a chat deleted while still on screen", () => {
+  it("does not come back as a draft, and lets the page close it", async () => {
+    let list = [conv("saved")];
+    vi.mocked(api.listConversations).mockImplementation(async () => list);
+    vi.spyOn(api, "deleteConversation").mockImplementation(async () => {
+      list = [];
+      return { deleted: true } as never;
+    });
+    const onDeleted = vi.fn();
+    // The slot is still open in the browser, so it is still offered as a draft.
+    await render({ liveDrafts: [conv("saved")], onDeleted });
+    await act(async () => header("Grid Trader").click());
+
+    const row = container.querySelector('[data-chat="saved"]')!;
+    await act(async () => row.querySelector<HTMLButtonElement>('[title="Delete"]')!.click());
+    const confirm = [...container.querySelectorAll("button")].find(
+      (b) => b.textContent === "Delete",
+    )!;
+    await act(async () => confirm.click());
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(onDeleted).toHaveBeenCalledWith("saved");
+    expect(container.querySelector('[data-chat="saved"]')).toBeNull();
   });
 });

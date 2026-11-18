@@ -1539,6 +1539,10 @@ export function useChatSocket() {
                 info.slot_id,
                 resync,
               );
+              // A turn that outlived the page is still answering, and its
+              // frames come to this socket now. Without this a reloaded chat
+              // read as idle and the rail closed it behind the reader.
+              if (info.is_busy) startStreaming(info.slot_id);
             }
             // A roster with anything on it is the conversation to be in, so
             // there is nothing to go looking for. A slot the backend reaped
@@ -2010,6 +2014,7 @@ export function useChatSocket() {
       noteFrame,
       prewarmLatest,
       queryClient,
+      startStreaming,
       stopStreaming,
       updateSlotMessages,
       uploadAndSend,

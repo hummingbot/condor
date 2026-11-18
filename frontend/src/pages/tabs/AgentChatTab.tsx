@@ -577,6 +577,22 @@ export function AgentChatTab() {
     [leaveHub, talkTo],
   );
   const closeRail = useCallback(() => setRailOpen(false), []);
+  // The server already stopped the chat's session on delete; the slot on
+  // screen is closed too, or it would stay open on a chat that no longer exists.
+  // Read through a ref: `chat.slots` changes with every streamed fragment, and
+  // the rail's `memo` must not.
+  const slotsNow = useRef(chat.slots);
+  useEffect(() => {
+    slotsNow.current = chat.slots;
+  });
+  const onDeletedConversation = useCallback(
+    (id: string) => {
+      const slot = slotsNow.current.find((s) => convIdOf(s) === id);
+      if (slot) destroySession(slot.info.slot_id);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- convIdOf is pure
+    [destroySession],
+  );
 
   const boundAgent = activeSlot?.info.agent_slug
     ? agents.find((a) => a.slug === activeSlot.info.agent_slug)
@@ -830,8 +846,12 @@ export function AgentChatTab() {
       : panelCount === 1
         ? "one"
         : "side";
-  const pickMain = (id: MainSlot) =>
-    id === "agent" ? openPane({ kind: "agent" }) : account.showOnly(id);
+  // `then` runs once the pick has happened: a guarded pane can still say no.
+  const pickMain = (id: MainSlot, then?: () => void) => {
+    if (id === "agent") return openPane({ kind: "agent" }, then);
+    account.showOnly(id);
+    then?.();
+  };
   /**
    * Put `id` in the top half: the pane for agent/desk, nothing in it for a side
    * panel. Emptying the pane goes through the desk's own close, which also
@@ -858,14 +878,22 @@ export function AgentChatTab() {
     // Mount only: later changes are the reader's own.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  /** Show exactly `id` beside the chat, outside the stacked layout. */
-  const showOne = (id: SlotId) => {
+  /**
+   * Show exactly `id` beside the chat, outside the stacked layout. Nothing
+   * moves until the pane's guard accepts: Cancel on unsaved edits leaves the
+   * screen exactly as it was. `then` finishes the caller's own change.
+   */
+  const showOne = (id: SlotId, then?: () => void) => {
     if (isSide(id)) {
-      openPane(null);
-      context.showOnly(id);
+      openPane(null, () => {
+        context.showOnly(id);
+        then?.();
+      });
     } else {
-      context.closeAll();
-      pickMain(id);
+      pickMain(id, () => {
+        context.closeAll();
+        then?.();
+      });
     }
   };
   const enterStack = (dir: StackPick["dir"]) => {
@@ -910,9 +938,9 @@ export function AgentChatTab() {
   const closeStackHalf = (half: "top" | "bottom") => {
     if (!keepsBelowDraft()) return;
     const keep = half === "top" ? stackBottom : stackTop;
-    setStack(null);
-    if (keep) showOne(keep);
-    else openPane(null);
+    const leaveSplit = () => setStack(null);
+    if (keep) showOne(keep, leaveSplit);
+    else openPane(null, leaveSplit);
   };
   const setLayoutChoice = (choice: LayoutChoice) => {
     // Turning the split on its side keeps both panels mounted; only leaving it drops one.
@@ -926,18 +954,20 @@ export function AgentChatTab() {
     }
     if (stackActive) {
       const halves = [stackTop, stackBottom].filter(Boolean) as SlotId[];
-      setStack(null);
+      // The split is forgotten only once the pane's guard has let it go.
+      const leaveSplit = () => setStack(null);
       if (choice === "chat") {
-        openPane(null);
-        context.closeAll();
+        openPane(null, () => {
+          context.closeAll();
+          leaveSplit();
+        });
       } else {
-        showOne(halves[0] ?? "agent");
+        showOne(halves[0] ?? "agent", leaveSplit);
       }
       return;
     }
     if (choice === "chat") {
-      openPane(null);
-      context.closeAll();
+      openPane(null, () => context.closeAll());
     } else {
       // Keep whichever panel is already up; with both up, the wide one stays.
       if (pane && context.shown.length > 0) context.closeAll();
@@ -1028,6 +1058,7 @@ export function AgentChatTab() {
           onTalk={onTalk}
           onNew={openFresh}
           onOpenConversation={openConversation}
+          onDeletedConversation={onDeletedConversation}
         />
 
         {/* ── Conversation, and what it set in motion ──
@@ -1412,12 +1443,17 @@ export function AgentChatTab() {
               onStackTop={pickStackTop}
               onStackBottom={pickStackBottom}
               onChoice={setLayoutChoice}
-              onMain={pickMain}
+              // In "chat + 1" there is one panel: picking another replaces it,
+              // whichever column either lives in.
+              onMain={(id) => (layoutChoice === "one" ? showOne(id) : pickMain(id))}
               onSide={(id) => {
                 // In "chat + 1" the side column *is* the one panel, so filling
                 // it from the picker gives the wide pane back.
-                if (layoutChoice === "one" && pane) openPane(null);
-                context.showOnly(id);
+                if (layoutChoice === "one" && pane) {
+                  openPane(null, () => context.showOnly(id));
+                } else {
+                  context.showOnly(id);
+                }
               }}
             />
           }

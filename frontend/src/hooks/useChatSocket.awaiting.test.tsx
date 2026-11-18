@@ -174,3 +174,34 @@ describe("a sent message", () => {
     expect(chat().isSlotAwaiting("s1")).toBe(false);
   });
 });
+
+describe("a page reloaded mid-answer", () => {
+  it("picks the answer back up as streaming, from the server's word", async () => {
+    act(() => {
+      root.render(
+        <QueryClientProvider client={new QueryClient()}>
+          <ServerContext value={{ server: "moneymaker", setServer: () => {} }}>
+            <Harness />
+          </ServerContext>
+        </QueryClientProvider>,
+      );
+    });
+    act(() => {
+      chat().connect();
+      sock().onopen?.();
+    });
+    deliver({
+      event: "sessions_list",
+      sessions: [
+        { ...ONE, is_busy: true },
+        { slot_id: "s2", conversation_id: "c2", agent_key: "k", alive: true },
+      ],
+    });
+    await settle();
+    expect(chat().isSlotStreaming("s1")).toBe(true);
+    expect(chat().isSlotStreaming("s2")).toBe(false);
+
+    deliver({ event: "prompt_done", slot_id: "s1" });
+    expect(chat().isSlotStreaming("s1")).toBe(false);
+  });
+});
