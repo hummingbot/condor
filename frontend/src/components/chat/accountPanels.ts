@@ -291,5 +291,14 @@ export function useAccountPanels({
     }),
   );
 
-  return { shown, toggle, close, showOnly, railItems };
+  /**
+   * `showOnly` and `close` without touching the pane, for a caller that has
+   * already moved it (the layout picker, once the unsaved-edits guard said
+   * yes). Moving it twice pushed two identical history entries, so Back had to
+   * be pressed twice to leave.
+   */
+  const keepOnly = (id: PanelId) => write([id]);
+  const forget = () => write([]);
+
+  return { shown, toggle, close, showOnly, keepOnly, forget, railItems };
 }

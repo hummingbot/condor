@@ -850,8 +850,9 @@ export function AgentChatTab() {
   const pickMain = (id: MainSlot, then?: () => void) => {
     if (id === "agent") return openPane({ kind: "agent" }, then);
     // The desk takes the pane, so the guard is asked before its sections move.
+    // The pane is written once, here; `keepOnly` only picks the section.
     openPane({ kind: "desk" }, () => {
-      account.showOnly(id);
+      account.keepOnly(id);
       then?.();
     });
   };
@@ -864,7 +865,7 @@ export function AgentChatTab() {
   const applyTop = (id: SlotId, then?: () => void) => {
     if (!isSide(id)) return pickMain(id, then);
     openPane(null, () => {
-      account.close();
+      account.forget();
       then?.();
     });
   };
