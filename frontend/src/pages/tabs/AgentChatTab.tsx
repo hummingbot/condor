@@ -451,13 +451,15 @@ export function AgentChatTab() {
     s.info.conversation_id || s.info.slot_id;
   // A turn is in flight from the moment it is sent, not from its first
   // fragment: `isSlotStreaming` only turns on when the answer starts, so a
-  // chat whose last message is still the user's (or whose send is queued) is
-  // working too, and must neither read as idle nor be closed behind the user.
+  // chat whose message is on the wire (or whose send is queued) is working
+  // too, and must neither read as idle nor be closed behind the user. Tracked
+  // by the socket rather than read off the transcript, so a turn stopped or
+  // ended before its first token stops reading as "Answering".
   const inFlight = (s: (typeof chat.slots)[number]) =>
     !!s.pending ||
     chat.isSlotStreaming(s.info.slot_id) ||
     chat.isSlotQueued(s.info.slot_id) ||
-    s.messages[s.messages.length - 1]?.role === "user";
+    chat.isSlotAwaiting(s.info.slot_id);
   const busyKey = chat.slots
     .filter(inFlight)
     .map(convIdOf)

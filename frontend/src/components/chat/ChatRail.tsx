@@ -1,11 +1,13 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
+  AlertTriangle,
   Archive,
   ArrowUpRight,
   Bot,
   ChevronDown,
   ChevronRight,
   Globe,
+  Loader2,
   MessageSquare,
   MoreHorizontal,
   PanelLeftClose,
@@ -267,7 +269,16 @@ export const ChatRail = memo(function ChatRail({
           onClose();
           onOpenConversation(meta);
         }}
-        renderAgent={({ agent, slug, name, count, expanded, holdsActive, onToggle }) => {
+        renderAgent={({
+          agent,
+          slug,
+          name,
+          count,
+          expanded,
+          holdsActive,
+          attention,
+          onToggle,
+        }) => {
           const isCondor = slug === CHAT_SLUG;
           const talkSlug = isCondor ? "" : slug;
           const live = !!agent && !isCondor && deriveAgentStatus(agent) === "running";
@@ -289,6 +300,7 @@ export const ChatRail = memo(function ChatRail({
               }
               expanded={count > 0 ? expanded : undefined}
               count={count}
+              attention={attention}
               live={live}
               isNew={agent?.is_new}
               // Lit when its chat is on screen but folded away, so the open
@@ -531,6 +543,7 @@ function RailRow({
   icon,
   expanded,
   count,
+  attention,
   live,
   isNew,
   active,
@@ -548,6 +561,8 @@ function RailRow({
   expanded?: boolean;
   /** How many chats it holds, shown folded. */
   count?: number;
+  /** A folded chat waits on an approval, or is answering. */
+  attention?: "waiting" | "busy";
   live?: boolean;
   /** Cloned from Botcamp and not opened once yet — see `ChatRail`'s `markSeen`. */
   isNew?: boolean;
@@ -598,6 +613,19 @@ function RailRow({
             New
           </span>
         )}
+        {attention === "waiting" ? (
+          <AlertTriangle
+            className="h-3.5 w-3.5 shrink-0 text-[var(--color-yellow)]"
+            aria-label="A chat is waiting for your approval"
+          >
+            <title>A chat is waiting for your approval</title>
+          </AlertTriangle>
+        ) : attention === "busy" ? (
+          <Loader2
+            className="h-3.5 w-3.5 shrink-0 animate-spin text-[var(--color-primary)]"
+            aria-label="Answering"
+          />
+        ) : null}
         {!!count && (
           <span
             title={`${count} chat${count === 1 ? "" : "s"}`}

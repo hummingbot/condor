@@ -78,6 +78,11 @@ export interface AgentGroupHeader {
   expanded: boolean;
   /** The open chat is one of this agent's. */
   holdsActive: boolean;
+  /**
+   * A chat inside a *folded* group needs the reader (`waiting`, an approval)
+   * or is answering (`busy`). Absent when open: the rows say it themselves.
+   */
+  attention?: "waiting" | "busy";
   onToggle: () => void;
 }
 
@@ -153,6 +158,11 @@ export const ConversationList = memo(function ConversationList({
     const extra = liveDrafts.filter((d) => !have.has(d.id));
     return extra.length ? [...extra, ...saved] : saved;
   }, [saved, liveDrafts]);
+
+  // Rows the server has not listed yet are live drafts: a chat still starting
+  // has only a temporary id, and Rename, Share, Archive or Delete sent with it
+  // name nothing the server knows. They can be opened, not managed, until then.
+  const savedIds = useMemo(() => new Set(saved.map((c) => c.id)), [saved]);
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: QUERY_KEY });
 
@@ -356,6 +366,7 @@ export const ConversationList = memo(function ConversationList({
             />
           ) : null}
         </button>
+        {savedIds.has(meta.id) && (
         <div className="absolute right-1 flex gap-0.5 opacity-0 transition-opacity group-hover/row:opacity-100 group-focus-within/row:opacity-100">
           <button
             onClick={() => {
@@ -391,6 +402,7 @@ export const ConversationList = memo(function ConversationList({
             <Trash2 className="h-3 w-3" />
           </button>
         </div>
+        )}
       </div>
       </div>
     );
@@ -411,6 +423,15 @@ export const ConversationList = memo(function ConversationList({
     const expanded = isExpanded(g.slug, g.items.length);
     const shown = showAll[g.slug] ? g.items : g.items.slice(0, PER_AGENT);
     const hidden = g.items.length - shown.length;
+    // Folded away, a chat's approval or answer has to show on its group, or
+    // the reader has no sign which chat to go back to.
+    const attention = expanded
+      ? undefined
+      : g.items.some((m) => waitingIds?.has(m.id))
+        ? ("waiting" as const)
+        : g.items.some((m) => busyIds?.has(m.id))
+          ? ("busy" as const)
+          : undefined;
     return (
       <div key={g.slug}>
         {renderAgent({
@@ -420,6 +441,7 @@ export const ConversationList = memo(function ConversationList({
           count: g.items.length,
           expanded,
           holdsActive: g.slug === activeGroup,
+          attention,
           onToggle: () => setGroupOpen(g.slug, !expanded),
         })}
         {expanded && (
