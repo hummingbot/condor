@@ -130,9 +130,6 @@ export const ConversationList = memo(function ConversationList({
   // Through the shared Escape stack rather than the input's own keydown, so
   // cancelling a rename does not also close whatever this list is shown in.
   useEscapeKey(renaming !== null, () => setRenaming(null));
-  // Through the shared Escape stack rather than the input's own keydown, so
-  // cancelling a rename does not also close whatever this list is shown in.
-  useEscapeKey(renaming !== null, () => setRenaming(null));
   const [draftTitle, setDraftTitle] = useState("");
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [sharing, setSharing] = useState<string | null>(null);
