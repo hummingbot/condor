@@ -707,8 +707,15 @@ export function useChatSocket() {
   // work without a staging area: the POST writes *inside* the conversation
   // directory, and the conversation directory is created by the spawn this
   // queue is waiting for.
+  //
+  // Each entry also keeps when it was typed (`at`): a prompt held here across
+  // an outage is the same instruction a frame in `unsent` is, and goes stale on
+  // the same clock (FU-03) — see `flushUnsent`.
   const outbox = useRef<
-    Record<string, { id: string; text: string; view: string; files?: File[] }[]>
+    Record<
+      string,
+      { id: string; text: string; view: string; files?: File[]; at: number }[]
+    >
   >({});
   // A tab opened optimistically is renamed on session_started: the client_ref
   // it was started under becomes the backend's slot id. The workspace follows
@@ -1119,20 +1126,34 @@ export function useChatSocket() {
    * was not sent, and an approval that is somehow still pending comes back on
    * screen through `replayPendingConfirmations`. Everything else — opening a
    * session, and above all Stop — is still sent however late.
+   *
+   * The prompts held in `outbox` for a tab whose spawn has not answered yet
+   * are judged here too, on the same clock: a new chat opened offline queues
+   * its `start_session` (which is still sent), and the prompt typed into it
+   * would otherwise go out on `session_started` however old it was. Judging
+   * them at the reconnect, not at the spawn, keeps a slow spawn on a live
+   * socket from costing the user a prompt that never sat through an outage.
    */
   const flushUnsent = useCallback(
     (ws: WebSocket) => {
       const queued = unsent.current;
       unsent.current = [];
       const now = Date.now();
+      const isStale = (at: number) => now - at > QUEUED_FRAME_TTL_MS;
       for (const { msg, at, slotId, messageId } of queued) {
-        const stale =
-          EXPIRING_ACTIONS.has(String(msg.action)) &&
-          now - at > QUEUED_FRAME_TTL_MS;
+        const stale = EXPIRING_ACTIONS.has(String(msg.action)) && isStale(at);
         if (!stale) ws.send(JSON.stringify(msg));
         if (slotId && messageId) {
           markDelivery(slotId, messageId, stale ? "unsent" : undefined);
         }
+      }
+      for (const [tabId, held] of Object.entries(outbox.current)) {
+        const fresh = held.filter((entry) => !isStale(entry.at));
+        for (const entry of held) {
+          if (isStale(entry.at)) markDelivery(tabId, entry.id, "unsent");
+        }
+        if (fresh.length) outbox.current[tabId] = fresh;
+        else delete outbox.current[tabId];
       }
     },
     [markDelivery],
@@ -1706,6 +1727,8 @@ export function useChatSocket() {
             // of them would let the second message overtake the first.
             void (async () => {
               for (const { id, text, view, files } of queued) {
+                // Held through an outage it read "queued"; it is going now.
+                markDelivery(newSlot.slot_id, id, undefined);
                 await uploadAndSend(newSlot.slot_id, convId, text, view, files, id);
               }
             })();
@@ -2122,6 +2145,7 @@ export function useChatSocket() {
       bufferChunk,
       flushChunks,
       hydrateSlot,
+      markDelivery,
       noteFrame,
       prewarmLatest,
       queryClient,
@@ -2179,7 +2203,18 @@ export function useChatSocket() {
       if (slot?.pending) {
         // The `File`s wait here with the words. Uploading now would write into a
         // conversation directory the spawn has not created yet.
-        (outbox.current[slotId] ||= []).push({ id, text, view, files });
+        (outbox.current[slotId] ||= []).push({
+          id,
+          text,
+          view,
+          files,
+          at: Date.now(),
+        });
+        // Offline, the bubble says it is waiting, as one in `unsent` does;
+        // the drain on session_started sends it and clears the mark.
+        if (wsRef.current?.readyState !== WebSocket.OPEN) {
+          markDelivery(slotId, id, "queued");
+        }
         return;
       }
 
@@ -2195,7 +2230,7 @@ export function useChatSocket() {
         id,
       );
     },
-    [flushChunks, updateSlotMessages, uploadAndSend],
+    [flushChunks, markDelivery, updateSlotMessages, uploadAndSend],
   );
 
   /**

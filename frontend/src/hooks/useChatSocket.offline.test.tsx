@@ -308,4 +308,87 @@ describe("the chat with its socket down (FU-03)", () => {
       { action: "resolve_permission", request_id: "r-new", approved: false },
     ]);
   });
+
+  describe("a prompt typed into a new chat that has not spawned yet", () => {
+    /** Open a chat while offline and type into it before it exists. */
+    async function typeIntoNewChatOffline(text: string) {
+      await open();
+      drop();
+      let ref = "";
+      act(() => {
+        ref = chat().startSession("k");
+      });
+      act(() => chat().sendMessage(ref, text));
+      await settle();
+      return ref;
+    }
+
+    const newChat = (slotId: string) =>
+      chat().slots.find((s) => s.info.slot_id === slotId)?.messages ?? [];
+
+    function spawned(fresh: FakeSocket, ref: string) {
+      const start = fresh.sent.find((f) => f.action === "start_session");
+      expect(start).toMatchObject({ client_ref: ref });
+      act(() => {
+        fresh.deliver({
+          event: "session_started",
+          slot_id: "s2",
+          conversation_id: "c2",
+          agent_key: "k",
+          client_ref: ref,
+        });
+      });
+    }
+
+    it("says it is queued, and goes out once the spawn answers a prompt reconnect", async () => {
+      const ref = await typeIntoNewChatOffline("what is SOL doing");
+      expect(newChat(ref).find((m) => m.role === "user")?.delivery).toBe("queued");
+
+      now += 5_000;
+      const fresh = reconnect();
+      spawned(fresh, ref);
+      await settle();
+
+      expect(fresh.sent).toContainEqual(
+        expect.objectContaining({ action: "send_message", text: "what is SOL doing" }),
+      );
+      expect(newChat("s2").find((m) => m.role === "user")?.delivery).toBeUndefined();
+    });
+
+    it("is not replayed after waiting past the bound, and says so", async () => {
+      const ref = await typeIntoNewChatOffline("close my position");
+
+      now += QUEUED_FRAME_TTL_MS + 1;
+      const fresh = reconnect();
+      // Opening the session is still wanted however late; the prompt is not.
+      spawned(fresh, ref);
+      await settle();
+
+      expect(actions(fresh)).not.toContain("send_message");
+      expect(newChat("s2").find((m) => m.role === "user")).toMatchObject({
+        text: "close my position",
+        delivery: "unsent",
+      });
+    });
+
+    it("waits out a slow spawn on a live socket however long it takes", async () => {
+      await open();
+      let ref = "";
+      act(() => {
+        ref = chat().startSession("k");
+      });
+      act(() => chat().sendMessage(ref, "hello"));
+      await settle();
+      expect(newChat(ref).find((m) => m.role === "user")?.delivery).toBeUndefined();
+
+      now += QUEUED_FRAME_TTL_MS * 2;
+      spawned(sock(), ref);
+      await settle();
+
+      expect(sock().sent).toContainEqual(
+        expect.objectContaining({ action: "send_message", text: "hello" }),
+      );
+    });
+  });
 });
+
