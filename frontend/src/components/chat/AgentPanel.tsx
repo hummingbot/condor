@@ -72,6 +72,7 @@ export function AgentPanel({
   onAskAgent,
   onDirtyChange,
   onClose,
+  slot,
 }: {
   /** Whose panel this is: the session's agent, the rail's pick, else Condor. */
   slug: string;
@@ -114,6 +115,8 @@ export function AgentPanel({
    */
   onDirtyChange?: (dirty: boolean) => void;
   onClose: () => void;
+  /** Draw in the stacked layout's lower slot instead of the pane (see `WorkspaceSheet`). */
+  slot?: "main" | "below";
 }) {
   const reportDirty = useRef(onDirtyChange);
   useEffect(() => {
@@ -123,6 +126,7 @@ export function AgentPanel({
 
   return (
     <WorkspaceSheet
+      slot={slot}
       title={name}
       // The wiring rides in the bar rather than in the body: it is about the
       // conversation, not about the agent, and it has to stay reachable

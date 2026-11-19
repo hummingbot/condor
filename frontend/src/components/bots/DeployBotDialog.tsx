@@ -198,13 +198,13 @@ export function ConfigEditor({
                         }}
                         className={`flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs transition-colors ${
                           (isEdited ? edits[key] === "true" : Boolean(originalValue))
-                            ? "border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+                            ? "border-[var(--color-primary)]/40 bg-[var(--color-primary-fill)]/10 text-[var(--color-primary)]"
                             : "border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text-muted)]"
                         }`}
                       >
                         <div className={`h-3 w-3 rounded-sm border flex items-center justify-center ${
                           (isEdited ? edits[key] === "true" : Boolean(originalValue))
-                            ? "border-[var(--color-primary)] bg-[var(--color-primary)]"
+                            ? "border-[var(--color-primary)] bg-[var(--color-primary-fill)]"
                             : "border-[var(--color-border)]"
                         }`}>
                           {(isEdited ? edits[key] === "true" : Boolean(originalValue)) && (
@@ -599,7 +599,7 @@ export function DeployBotDialog({
             <button
               onClick={() => deployMutation.mutate()}
               disabled={!hasSelected || !botName.trim() || deployMutation.isPending}
-              className="flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-white transition-opacity disabled:opacity-40"
+              className="flex items-center gap-2 rounded-lg bg-[var(--color-primary-fill)] px-4 py-2 text-sm font-medium text-[var(--on-primary)] transition-opacity disabled:opacity-40"
             >
               <Rocket className="h-4 w-4" />
               {deployMutation.isPending

@@ -95,7 +95,7 @@ export function ExecutorSuccessModal({
         {/* Action */}
         <button
           onClick={onPrimary ?? onClose}
-          className="w-full rounded-lg bg-[var(--color-primary)] px-4 py-2 text-xs font-semibold text-white transition-colors hover:brightness-110"
+          className="w-full rounded-lg bg-[var(--color-primary-fill)] px-4 py-2 text-xs font-semibold text-[var(--on-primary)] transition-colors hover:brightness-110"
         >
           {primaryLabel}
         </button>

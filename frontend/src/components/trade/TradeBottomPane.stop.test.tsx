@@ -12,6 +12,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ServerContext } from "@/hooks/useServer";
@@ -35,7 +36,11 @@ vi.mock("@/lib/api", async (importOriginal) => {
       ...actual.api,
       stopExecutor,
       clearPositionHeld,
-      getPortfolio: vi.fn(async () => ({ server: "prod", connectors: [], total_usd: 0 })),
+      getPortfolio: vi.fn(async () => ({
+        server: "prod",
+        connectors: [],
+        total_usd: 0,
+      })),
       // 5 BRL per display dollar.
       getRates: vi.fn(async () => ({ rates: { "USDT-BRL": 5 } })),
     },
@@ -91,21 +96,27 @@ async function flush() {
 }
 
 async function mount() {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
   await act(async () => {
     root.render(
-      <QueryClientProvider client={client}>
-        <ServerContext.Provider value={{ server: "prod", setServer: () => {} }}>
-          <TradeBottomPane
-            executors={[EXECUTOR]}
-            positions={[POSITION]}
-            isLoadingPositions={false}
-            connector="binance"
-            pair="BTC-BRL"
-            isSpot
-          />
-        </ServerContext.Provider>
-      </QueryClientProvider>,
+      <MemoryRouter>
+        <QueryClientProvider client={client}>
+          <ServerContext.Provider
+            value={{ server: "prod", setServer: () => {} }}
+          >
+            <TradeBottomPane
+              executors={[EXECUTOR]}
+              positions={[POSITION]}
+              isLoadingPositions={false}
+              connector="binance"
+              pair="BTC-BRL"
+              isSpot
+            />
+          </ServerContext.Provider>
+        </QueryClientProvider>
+      </MemoryRouter>,
     );
   });
   await flush();

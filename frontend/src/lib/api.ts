@@ -2740,6 +2740,8 @@ export interface ConversationMeta {
   updated_at: string;
   turn_count: number;
   last_snippet: string;
+  /** Put away by its owner; listed under "Archived". Absent on older servers. */
+  archived?: boolean;
   /** Set once this conversation has been shared (FEAT-054); "" if never. The
    *  delete token that revokes the share is deliberately not here — it never
    *  crosses the API boundary. */
@@ -5221,6 +5223,12 @@ export const api = {
     apiFetch<ConversationDeployments>(
       `/api/v1/conversations/${encodeURIComponent(id)}/deployments`,
     ),
+
+  setConversationArchived: (id: string, archived: boolean) =>
+    apiFetch<ConversationMeta>(`/api/v1/conversations/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ archived }),
+    }),
 
   renameConversation: (id: string, title: string) =>
     apiFetch<ConversationMeta>(

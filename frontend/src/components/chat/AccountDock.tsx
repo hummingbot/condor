@@ -74,7 +74,10 @@ export function AccountDock({
   onClose,
   onOpenAgent,
   onOpenLoop,
+  slot,
 }: {
+  /** Draw in the stacked layout's lower slot instead of the pane (see `WorkspaceSheet`). */
+  slot?: "main" | "below";
   server: string | null;
   /** The open sections, from {@link useAccountPanels}. */
   shown: PanelId[];
@@ -107,11 +110,12 @@ export function AccountDock({
 
   return (
     <WorkspaceSheet
+      slot={slot}
       // The server, once, at the top — a total with no desk attached to it is
       // a number nobody can act on, and saying it on every section header
       // spent the width the tables now use.
       title={server}
-      subtitle="Portfolio and execution"
+      subtitle="Portfolio and activity"
       onClose={onClose}
       // No full screen, for the reason the agent panel has none: this is read
       // against the conversation beside it, and the only outcome of the

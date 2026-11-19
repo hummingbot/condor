@@ -86,7 +86,7 @@ export function BubbleGroup({
           {title}
         </span>
         {selected.length > 0 && (
-          <span className="rounded-full bg-[var(--color-primary)]/15 px-1.5 text-[9px] font-bold tabular-nums text-[var(--color-primary)]">
+          <span className="rounded-full bg-[var(--color-primary-fill)]/15 px-1.5 text-[9px] font-bold tabular-nums text-[var(--color-primary)]">
             {selected.length}
           </span>
         )}
@@ -150,7 +150,7 @@ export function BubbleGroup({
               title={`${option.value} — ${option.count} in scope`}
               className={`flex max-w-full items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] transition-colors ${
                 on
-                  ? "border-[var(--color-primary)] bg-[var(--color-primary)]/15 font-semibold text-[var(--color-primary)]"
+                  ? "border-[var(--color-primary)] bg-[var(--color-primary-fill)]/15 font-semibold text-[var(--color-primary)]"
                   : "border-[var(--color-border)] text-[var(--color-text-muted)] hover:border-[var(--color-primary)]/50 hover:text-[var(--color-text)]"
               }`}
             >

@@ -283,7 +283,7 @@ export function RoutinePicker({
                   onClick={() => pick(r.name)}
                   className={`block w-full border-l-2 px-2.5 py-1.5 text-left transition-colors focus:outline-none ${
                     isActive
-                      ? "border-l-[var(--color-primary)] bg-[var(--color-primary)]/5"
+                      ? "border-l-[var(--color-primary)] bg-[var(--color-primary-fill)]/5"
                       : "border-l-transparent hover:bg-[var(--color-surface-hover)] focus:bg-[var(--color-surface-hover)]"
                   }`}
                 >

@@ -67,6 +67,7 @@ vi.mock("@/hooks/useChat", () => ({
     slots: [],
     isSlotStreaming: () => false,
     isSlotQueued: () => false,
+    isSlotAwaiting: () => false,
     permissionFor: () => null,
     permissionRequests: {},
     resolvePermission: vi.fn(),

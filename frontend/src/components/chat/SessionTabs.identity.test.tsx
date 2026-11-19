@@ -100,9 +100,9 @@ describe("SessionTabs identity", () => {
       slot({ slot_id: "b", agent_slug: "", label: "Condor" }),
     ]);
 
-    expect(tabs()[0].getAttribute("title")).toBe("Arbitrage — brigado_2");
+    expect(tabs()[0].getAttribute("title")).toMatch(/^Arbitrage · brigado_2 — /);
     // No server, no dangling separator.
-    expect(tabs()[1].getAttribute("title")).toBe("Condor");
+    expect(tabs()[1].getAttribute("title")).toMatch(/^Condor — /);
   });
 
   it("still numbers two chats with the same agent", async () => {
@@ -113,7 +113,7 @@ describe("SessionTabs identity", () => {
 
     expect(tabs()[0].textContent).not.toContain("#");
     expect(tabs()[1].textContent).toContain("#2");
-    expect(tabs()[1].getAttribute("title")).toBe("Arbitrage #2 — brigado_2");
+    expect(tabs()[1].getAttribute("title")).toMatch(/^Arbitrage #2 · brigado_2 — /);
   });
 
   it("numbers two unbound chats on different models (CORR-410)", async () => {
@@ -126,6 +126,6 @@ describe("SessionTabs identity", () => {
 
     expect(tabs()[0].textContent).not.toContain("#");
     expect(tabs()[1].textContent).toContain("#2");
-    expect(tabs()[1].getAttribute("title")).toBe("Condor #2");
+    expect(tabs()[1].getAttribute("title")).toMatch(/^Condor #2 — /);
   });
 });

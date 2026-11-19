@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ChevronUp, ChevronDown, Loader2, Square, Trash2, Wallet, Clock, ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
+import { ChevronUp, ChevronDown, Loader2, Square, Trash2, Wallet, Clock, ArrowUpDown, ArrowUp, ArrowDown, ArrowRight } from "lucide-react";
+import { Link } from "react-router-dom";
 
 import { api, type ExecutorInfo, type ConsolidatedPosition } from "@/lib/api";
 import { useServer } from "@/hooks/useServer";
@@ -494,6 +495,17 @@ export function TradeBottomPane({
               Positions ({positions.length})
               {isLoadingPositions && <Loader2 className="ml-1 inline h-3 w-3 animate-spin" />}
             </button>
+            {/* This pane is the slice for one market or pool; Activity is where
+                every executor and position lives, with history and PnL — so the
+                door to it sits beside the tabs that show the slice. */}
+            <Link
+              to="/bots"
+              className="flex shrink-0 items-center gap-1 border-l border-[var(--color-border)] px-3 text-[11px] font-medium text-[var(--color-primary)] transition-colors hover:bg-[var(--color-surface-hover)]"
+              title="Every executor and position, with history and PnL"
+            >
+              All in Activity
+              <ArrowRight className="h-3 w-3" />
+            </Link>
           </div>
 
           {/* Content */}
@@ -538,7 +550,7 @@ export function TradeBottomPane({
                           key={ex.id}
                           className={`border-b border-[var(--color-border)]/30 transition-colors ${
                             isSelected
-                              ? "bg-[var(--color-primary)]/10 hover:bg-[var(--color-primary)]/15"
+                              ? "bg-[var(--color-primary-fill)]/10 hover:bg-[var(--color-primary-fill)]/15"
                               : active
                                 ? "bg-[var(--color-green)]/5 hover:bg-[var(--color-green)]/10"
                                 : "hover:bg-[var(--color-surface-hover)]/50"

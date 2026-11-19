@@ -57,7 +57,7 @@ describe("routeFacts", () => {
 
   it("labels every plain page", () => {
     expect(routeFacts("/portfolio", "")?.label).toBe("Portfolio");
-    expect(routeFacts("/bots", "")?.label).toBe("Bots");
+    expect(routeFacts("/bots", "")?.label).toBe("Activity");
     expect(routeFacts("/trade", "")?.label).toBe("Trade");
     expect(routeFacts("/dex", "")?.label).toBe("DEX pools");
     expect(routeFacts("/routines", "")?.label).toBe("Routines");
@@ -115,14 +115,14 @@ describe("routeFacts", () => {
     // The tab bar is gone (FEAT-084): `/bots` is the controller browser, and a
     // stale link to a tab that no longer exists lands on it rather than being
     // announced as a screen nobody can be on.
-    expect(routeFacts("/bots", "")?.label).toBe("Bots");
-    expect(routeFacts("/bots", "?tab=editor")?.label).toBe("Bots");
-    expect(routeFacts("/bots", "?tab=backtest")?.label).toBe("Bots");
+    expect(routeFacts("/bots", "")?.label).toBe("Activity");
+    expect(routeFacts("/bots", "?tab=editor")?.label).toBe("Activity");
+    expect(routeFacts("/bots", "?tab=backtest")?.label).toBe("Activity");
     // Runs and Archived are the Terminated population now, and `Bots.tsx`
     // redirects both into it — so they name the browser too (FEAT-086).
-    expect(routeFacts("/bots", "?tab=runs")?.label).toBe("Bots");
-    expect(routeFacts("/bots", "?tab=archived")?.label).toBe("Bots");
-    expect(routeFacts("/bots", "?scope=bot:mm-1")?.label).toBe("Bots");
+    expect(routeFacts("/bots", "?tab=runs")?.label).toBe("Activity");
+    expect(routeFacts("/bots", "?tab=archived")?.label).toBe("Activity");
+    expect(routeFacts("/bots", "?scope=bot:mm-1")?.label).toBe("Activity");
   });
 
   it("says nothing on a route it does not know", () => {

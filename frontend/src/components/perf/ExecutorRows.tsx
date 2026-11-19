@@ -115,7 +115,7 @@ function BulkActionBar({
 }) {
   if (count === 0) return null;
   return (
-    <div className="flex items-center gap-3 border-b border-[var(--color-primary)]/30 bg-[var(--color-primary)]/5 px-3 py-1.5">
+    <div className="flex items-center gap-3 border-b border-[var(--color-primary)]/30 bg-[var(--color-primary-fill)]/5 px-3 py-1.5">
       <span className="text-xs font-medium">{count} selected</span>
       <div className="flex-1" />
       <button

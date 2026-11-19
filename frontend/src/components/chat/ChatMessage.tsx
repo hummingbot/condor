@@ -459,7 +459,7 @@ function StartErrorNote({
           {canFallBackToDefault && (
             <button
               onClick={() => onRetryModel(defaultAgentKey, message.id)}
-              className="rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-semibold text-[var(--on-primary)] hover:bg-[var(--color-primary-hover)]"
+              className="rounded-md bg-[var(--color-primary-fill)] px-3 py-1.5 text-xs font-semibold text-[var(--on-primary)] hover:bg-[var(--color-primary-hover)]"
             >
               Use {defaultLabel}
             </button>
@@ -637,7 +637,7 @@ export const ChatMessageView = memo(function ChatMessageView({
           <div className="mt-1">
             <TurnActions ts={message.ts} text={message.text} />
           </div>
-          <div className="max-w-[70%] rounded-2xl rounded-tr-sm bg-[var(--color-primary)] px-3.5 py-2 text-sm text-[var(--on-primary)]">
+          <div className="max-w-[70%] rounded-2xl rounded-tr-sm bg-[var(--color-primary-fill)] px-3.5 py-2 text-sm text-[var(--on-primary)]">
             {message.attachments && message.attachments.length > 0 && (
               <div
                 className={`flex flex-wrap justify-end gap-1.5 ${message.text ? "mb-2" : ""}`}

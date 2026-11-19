@@ -181,7 +181,7 @@ function NetworkConfigEditor({ server, networkId }: { server: string; networkId:
           onClick={save}
           disabled={changed.length === 0 || saveMut.isPending || !isOwner}
           title={isOwner ? undefined : OWNER_ONLY_HINT}
-          className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:cursor-not-allowed disabled:opacity-50"
+          className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary-fill)] px-3 py-1.5 text-xs font-medium text-[var(--on-primary)] transition-colors hover:bg-[var(--color-primary-fill)]/80 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {saveMut.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
           Save {changed.length > 0 ? `(${changed.length})` : ""}
@@ -467,7 +467,7 @@ export function GatewaySettings() {
             ) : (
               <button
                 onClick={() => setShowDeploy(!showDeploy)}
-                className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80"
+                className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary-fill)] px-3 py-1.5 text-xs font-medium text-[var(--on-primary)] transition-colors hover:bg-[var(--color-primary-fill)]/80"
               >
                 <Play className="h-3 w-3" /> Deploy
               </button>
@@ -533,7 +533,7 @@ export function GatewaySettings() {
                   disabled={pulling}
                   className={`rounded-md border px-3 py-1.5 text-xs transition-colors ${
                     pullImage === opt.value
-                      ? "border-[var(--color-primary)] bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+                      ? "border-[var(--color-primary)] bg-[var(--color-primary-fill)]/10 text-[var(--color-primary)]"
                       : "border-[var(--color-border)] text-[var(--color-text-muted)] hover:border-[var(--color-border-hover)]"
                   } disabled:opacity-50`}
                 >
@@ -545,7 +545,7 @@ export function GatewaySettings() {
                 disabled={pulling}
                 className={`rounded-md border px-3 py-1.5 text-xs transition-colors ${
                   pullImage === "custom"
-                    ? "border-[var(--color-primary)] bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+                    ? "border-[var(--color-primary)] bg-[var(--color-primary-fill)]/10 text-[var(--color-primary)]"
                     : "border-[var(--color-border)] text-[var(--color-text-muted)] hover:border-[var(--color-border-hover)]"
                 } disabled:opacity-50`}
               >
@@ -556,7 +556,7 @@ export function GatewaySettings() {
                   onClick={() => pullMut.mutate()}
                   disabled={pulling || !isOwner}
                   title={isOwner ? undefined : OWNER_ONLY_HINT}
-                  className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary-fill)] px-3 py-1.5 text-xs font-medium text-[var(--on-primary)] transition-colors hover:bg-[var(--color-primary-fill)]/80 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {pulling ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
                   Pull
@@ -576,7 +576,7 @@ export function GatewaySettings() {
                   onClick={() => pullMut.mutate()}
                   disabled={pulling || !pullCustomImage || !isOwner}
                   title={isOwner ? undefined : OWNER_ONLY_HINT}
-                  className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary-fill)] px-3 py-1.5 text-xs font-medium text-[var(--on-primary)] transition-colors hover:bg-[var(--color-primary-fill)]/80 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {pulling ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
                   Pull
@@ -637,7 +637,7 @@ export function GatewaySettings() {
                     onClick={() => setImage(opt.value)}
                     className={`rounded-md border px-3 py-1.5 text-xs transition-colors ${
                       image === opt.value
-                        ? "border-[var(--color-primary)] bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+                        ? "border-[var(--color-primary)] bg-[var(--color-primary-fill)]/10 text-[var(--color-primary)]"
                         : "border-[var(--color-border)] text-[var(--color-text-muted)] hover:border-[var(--color-border-hover)]"
                     }`}
                   >
@@ -648,7 +648,7 @@ export function GatewaySettings() {
                   onClick={() => setImage("custom")}
                   className={`rounded-md border px-3 py-1.5 text-xs transition-colors ${
                     image === "custom"
-                      ? "border-[var(--color-primary)] bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+                      ? "border-[var(--color-primary)] bg-[var(--color-primary-fill)]/10 text-[var(--color-primary)]"
                       : "border-[var(--color-border)] text-[var(--color-text-muted)] hover:border-[var(--color-border-hover)]"
                   }`}
                 >
@@ -684,7 +684,7 @@ export function GatewaySettings() {
               onClick={() => startMut.mutate()}
               disabled={startMut.isPending || (image === "custom" && !customImage) || !isOwner}
               title={isOwner ? undefined : OWNER_ONLY_HINT}
-              className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-4 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:cursor-not-allowed disabled:opacity-50"
+              className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary-fill)] px-4 py-1.5 text-xs font-medium text-[var(--on-primary)] transition-colors hover:bg-[var(--color-primary-fill)]/80 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {startMut.isPending && <Loader2 className="h-3 w-3 animate-spin" />}
               Start Gateway

@@ -97,7 +97,7 @@ export function ImportGatewayWallet({
       </div>
 
       {importedAddress !== null ? (
-        <div className="flex items-start gap-2 rounded-lg border border-[var(--color-primary)]/30 bg-[var(--color-primary)]/5 p-3 text-sm text-[var(--color-text)]">
+        <div className="flex items-start gap-2 rounded-lg border border-[var(--color-primary)]/30 bg-[var(--color-primary-fill)]/5 p-3 text-sm text-[var(--color-text)]">
           <Check className="mt-0.5 h-4 w-4 shrink-0 text-[var(--color-primary)]" />
           <span>
             Wallet imported into Gateway.
@@ -170,7 +170,7 @@ export function ImportGatewayWallet({
             <button
               onClick={handleImport}
               disabled={saving || !keyLooksValid}
-              className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-4 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:opacity-50"
+              className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary-fill)] px-4 py-1.5 text-xs font-medium text-[var(--on-primary)] transition-colors hover:bg-[var(--color-primary-fill)]/80 disabled:opacity-50"
             >
               {saving && <Loader2 className="h-3 w-3 animate-spin" />}
               Import into Gateway

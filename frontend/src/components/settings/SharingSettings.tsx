@@ -175,14 +175,14 @@ export function SharingSettings() {
                 onClick={() => choose.mutate(choice.value)}
                 className={`flex w-full items-start gap-3 rounded-lg border px-3 py-2 text-left transition-colors ${
                   selected
-                    ? "border-[var(--color-primary)] bg-[var(--color-primary)]/10"
+                    ? "border-[var(--color-primary)] bg-[var(--color-primary-fill)]/10"
                     : "border-[var(--color-border)] hover:bg-[var(--color-surface-hover)]"
                 } ${blocked ? "cursor-not-allowed opacity-50" : "cursor-pointer"}`}
               >
                 <span
                   className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${
                     selected
-                      ? "border-[var(--color-primary)] bg-[var(--color-primary)]"
+                      ? "border-[var(--color-primary)] bg-[var(--color-primary-fill)]"
                       : "border-[var(--color-border)]"
                   }`}
                 >
@@ -350,7 +350,7 @@ export function SharingSettings() {
             className={`flex w-full items-center gap-3 rounded-lg border px-3 py-2 text-left transition-colors ${
               settings.enabled
                 ? "border-[var(--color-border)] hover:bg-[var(--color-surface-hover)]"
-                : "border-[var(--color-primary)] bg-[var(--color-primary)]/10"
+                : "border-[var(--color-primary)] bg-[var(--color-primary-fill)]/10"
             } ${settings.env_overridden ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}
           >
             <ShieldOff

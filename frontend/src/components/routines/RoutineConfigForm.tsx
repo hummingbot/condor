@@ -118,7 +118,7 @@ export function RoutineConfigForm({ fields, values, onChange }: Props) {
               onClick={() => onChange(key, !values[key])}
               className={`rounded px-3 py-1.5 text-xs font-medium transition-colors ${
                 values[key]
-                  ? "bg-[var(--color-primary)]/20 text-[var(--color-primary)]"
+                  ? "bg-[var(--color-primary-fill)]/20 text-[var(--color-primary)]"
                   : "bg-[var(--color-surface-hover)] text-[var(--color-text-muted)]"
               }`}
             >

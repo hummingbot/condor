@@ -16,6 +16,7 @@ import { Agents } from "@/pages/Agents";
 import { BotDetail } from "@/pages/BotDetail";
 import { Bots } from "@/pages/Bots";
 import { CreateExecutor } from "@/pages/CreateExecutor";
+import { DesignSystem } from "@/pages/DesignSystem";
 import { Dex } from "@/pages/Dex";
 import { DexPool } from "@/pages/DexPool";
 import { Login } from "@/pages/Login";
@@ -168,6 +169,7 @@ export default function App() {
                     column, so the rail and the dock stay where they were. */}
                 <Route path="/hub" element={<Agents />} />
                 <Route path="/settings" element={<Settings />} />
+                {import.meta.env.DEV && <Route path="/_design" element={<DesignSystem />} />}
                 <Route path="/market" element={<Navigate to="/trade" replace />} />
                 {/* Inside the shell on purpose: a mistyped address used to
                     match nothing and render a blank page, without even the

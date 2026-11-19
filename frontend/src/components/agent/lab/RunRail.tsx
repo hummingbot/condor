@@ -210,7 +210,7 @@ function Chip({
       onClick={onClick}
       className={`rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors ${
         active
-          ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+          ? "bg-[var(--color-primary-fill)]/15 text-[var(--color-primary)]"
           : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
       }`}
     >
@@ -276,7 +276,7 @@ function RunRow({
       onClick={onClick}
       className={`w-full px-3 py-2.5 text-left transition-all ${
         active
-          ? "border-l-2 border-l-[var(--color-primary)] bg-[var(--color-primary)]/5"
+          ? "border-l-2 border-l-[var(--color-primary)] bg-[var(--color-primary-fill)]/5"
           : "border-l-2 border-l-transparent hover:bg-[var(--color-surface-hover)]"
       }`}
     >

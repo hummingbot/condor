@@ -207,7 +207,7 @@ function PrimaryButton({
   return (
     <button
       {...rest}
-      className={`flex items-center gap-1.5 rounded-lg bg-[var(--color-primary)] px-3 py-1.5 text-sm font-semibold text-[var(--on-primary)] transition-colors hover:bg-[var(--color-primary-hover)] disabled:cursor-not-allowed disabled:opacity-50 ${className}`}
+      className={`flex items-center gap-1.5 rounded-lg bg-[var(--color-primary-fill)] px-3 py-1.5 text-sm font-semibold text-[var(--on-primary)] transition-colors hover:bg-[var(--color-primary-hover)] disabled:cursor-not-allowed disabled:opacity-50 ${className}`}
     >
       {children}
     </button>
@@ -1143,7 +1143,7 @@ export function ImportAgentDialog({
                   <button
                     onClick={() => active && reviewUpdate(active, plan.collision)}
                     disabled={busy}
-                    className="flex items-center gap-1.5 rounded-lg border border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 px-3 py-1.5 text-sm font-semibold text-[var(--color-primary)] transition-all hover:bg-[var(--color-primary)]/20 disabled:cursor-not-allowed disabled:opacity-40"
+                    className="flex items-center gap-1.5 rounded-lg border border-[var(--color-primary)]/40 bg-[var(--color-primary-fill)]/10 px-3 py-1.5 text-sm font-semibold text-[var(--color-primary)] transition-all hover:bg-[var(--color-primary-fill)]/20 disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     <RefreshCw className="h-4 w-4" />
                     Review the changes
@@ -1372,7 +1372,7 @@ export function ImportAgentDialog({
                         ? "Tick the box above to enable Update"
                         : undefined
                     }
-                    className="flex items-center gap-1.5 rounded-lg border border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 px-3 py-1.5 text-sm font-semibold text-[var(--color-primary)] transition-all hover:bg-[var(--color-primary)]/20 disabled:cursor-not-allowed disabled:opacity-40"
+                    className="flex items-center gap-1.5 rounded-lg border border-[var(--color-primary)]/40 bg-[var(--color-primary-fill)]/10 px-3 py-1.5 text-sm font-semibold text-[var(--color-primary)] transition-all hover:bg-[var(--color-primary-fill)]/20 disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     <RefreshCw className="h-4 w-4" />
                     Update {update.slug}
@@ -1447,8 +1447,8 @@ function SuccessScreen({
 
   return (
     <div className="space-y-4">
-      <div className="flex items-start gap-3 rounded-xl border border-[var(--color-primary)]/30 bg-[var(--color-primary)]/5 p-3.5">
-        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--color-primary)]/15 text-[var(--color-primary)]">
+      <div className="flex items-start gap-3 rounded-xl border border-[var(--color-primary)]/30 bg-[var(--color-primary-fill)]/5 p-3.5">
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--color-primary-fill)]/15 text-[var(--color-primary)]">
           <Check className="h-4 w-4" />
         </span>
         <p className="min-w-0 text-sm font-semibold text-[var(--color-text)]">

@@ -28,7 +28,7 @@ function Segment<T extends string>({
       title={title}
       className={`flex flex-1 items-center justify-center gap-1 rounded px-2 py-1 text-[10px] font-medium transition-colors ${
         active
-          ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+          ? "bg-[var(--color-primary-fill)]/15 text-[var(--color-primary)]"
           : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
       }`}
     >

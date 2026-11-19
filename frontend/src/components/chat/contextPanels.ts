@@ -101,6 +101,8 @@ export type ContextPanels = {
   /** The panes on screen, in the order the column draws them. */
   shown: ContextPaneId[];
   toggle: (id: ContextPaneId) => void;
+  /** Exactly this pane, nothing else — the layout picker's "Panel 2" choice. */
+  showOnly: (id: ContextPaneId) => void;
   closeAll: () => void;
   instances: RoutineInstance[];
   routines: RoutineInfo[];
@@ -138,6 +140,11 @@ export function useContextPanels({
       }),
     [],
   );
+
+  const showOnly = useCallback((id: ContextPaneId) => {
+    setShown([id]);
+    localStorage.setItem(DOCK_PANES_KEY, JSON.stringify([id]));
+  }, []);
 
   const closeAll = useCallback(() => {
     setShown([]);
@@ -218,7 +225,7 @@ export function useContextPanels({
 
   // One identity per real change, so `ContextDock`'s memo holds across a flush.
   return useMemo(
-    () => ({ shown, toggle, closeAll, instances, routines, railItems }),
-    [shown, toggle, closeAll, instances, routines, railItems],
+    () => ({ shown, toggle, showOnly, closeAll, instances, routines, railItems }),
+    [shown, toggle, showOnly, closeAll, instances, routines, railItems],
   );
 }

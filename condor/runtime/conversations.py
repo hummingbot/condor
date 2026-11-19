@@ -289,6 +289,10 @@ class ConversationMeta(BaseModel):
     updated_at: datetime = Field(default_factory=_utcnow)
     turn_count: int = 0
     last_snippet: str = ""
+    archived: bool = Field(
+        default=False,
+        description="Put away by its owner: listed apart, never deleted by it.",
+    )
 
     # ── Sharing (FEAT-054) ──
     # Optional, defaulted, and tolerated in both directions like every other
@@ -517,8 +521,37 @@ def _meta_mtime(base: Path, name: str) -> int:
         return 0
 
 
+def is_empty(meta: ConversationMeta) -> bool:
+    """Nothing was ever said in it: no turn, no title, never shared.
+
+    A session mints its conversation the moment it opens (the id *is* the
+    slot), so every chat opened and left without a message used to persist as
+    an empty row. Those are not conversations, and are neither listed nor kept.
+    """
+    return not meta.turn_count and not meta.title and not meta.share_id
+
+
+def discard_if_empty(user_id: int, conv_id: str) -> bool:
+    """Delete the conversation if nothing was said in it. True if it was removed."""
+    meta = get_conversation(user_id, conv_id)
+    if meta is None or not is_empty(meta):
+        return False
+    # A first answer still being recorded has not written its turns yet, so the
+    # meta reads empty. Closing the tab must not erase it: the turn lands when
+    # the recorder flushes, and then it is a conversation.
+    if any(
+        r.user_id == user_id and r.conv_id == conv_id for r in list(_live_recorders)
+    ):
+        return False
+    return delete_conversation(user_id, conv_id)
+
+
 def list_conversations(
-    user_id: int, *, limit: int = 100, agent_slug: str | None = None
+    user_id: int,
+    *,
+    limit: int = 100,
+    agent_slug: str | None = None,
+    skip_empty: bool = False,
 ) -> list[ConversationMeta]:
     """This user's conversations, newest first.
 
@@ -543,6 +576,9 @@ def list_conversations(
     chats are all older than the owner's newest ``limit`` chats with Condor
     still gets them (CORR-652). The price is a parse per newer non-matching
     meta — bounded by the store size, the cost ``limit=0`` callers already pay.
+
+    ``skip_empty`` leaves out conversations nothing was said in (:func:`is_empty`),
+    also inside the walk, so they do not use up ``limit``.
     """
     if agent_slug is not None:
         from condor.memory.paths import CHAT_SLUG
@@ -571,6 +607,8 @@ def list_conversations(
         if meta is None:
             continue
         if agent_slug is not None and (meta.agent_slug or CHAT_SLUG) != agent_slug:
+            continue
+        if skip_empty and is_empty(meta):
             continue
         metas.append(meta)
         if limit and len(metas) >= limit:
@@ -868,11 +906,22 @@ def rename(user_id: int, conv_id: str, title: str) -> bool:
     return update_meta(user_id, conv_id, title=_truncate(title, TITLE_MAX_CHARS))
 
 
+def set_archived(user_id: int, conv_id: str, archived: bool) -> bool:
+    """Archive or restore a conversation. Returns False when it does not exist."""
+    return update_meta(user_id, conv_id, archived=bool(archived))
+
+
 def delete_conversation(user_id: int, conv_id: str) -> bool:
     """Remove a conversation and its transcript. The only destructive verb."""
     conv_dir = _conv_dir(user_id, conv_id)
     if not conv_dir.is_dir():
         return False
+    # A turn still unwinding would flush after this and recreate the directory
+    # as a transcript with no meta, which no list shows. It has nowhere to go.
+    for recorder in list(_live_recorders):
+        if recorder.user_id == user_id and recorder.conv_id == conv_id:
+            recorder.enabled = False
+            _live_recorders.discard(recorder)
     shutil.rmtree(conv_dir, ignore_errors=True)
     return not conv_dir.exists()
 

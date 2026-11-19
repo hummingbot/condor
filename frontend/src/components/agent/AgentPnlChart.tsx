@@ -144,7 +144,7 @@ export function AgentPnlChart({ data, height = 180, title, bare = false }: Agent
         },
       });
     });
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "data-colorblind"] });
     return () => observer.disconnect();
   }, [chartReady]);
 

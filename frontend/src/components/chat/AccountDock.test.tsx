@@ -271,14 +271,14 @@ describe("the account dock", () => {
 
     await click(tab("Portfolio"));
     expect(tab("Portfolio").getAttribute("aria-pressed")).toBe("true");
-    expect(tab("Execution").getAttribute("aria-pressed")).toBe("false");
+    expect(tab("Activity").getAttribute("aria-pressed")).toBe("false");
     expect(getPortfolio).toHaveBeenCalledTimes(1);
     // The other panel is a header bar, so its own fetches stay unmade.
     expect(getBots).not.toHaveBeenCalled();
 
-    await click(tab("Execution"));
+    await click(tab("Activity"));
     expect(tab("Portfolio").getAttribute("aria-pressed")).toBe("true");
-    expect(tab("Execution").getAttribute("aria-pressed")).toBe("true");
+    expect(tab("Activity").getAttribute("aria-pressed")).toBe("true");
     expect(getBots).toHaveBeenCalledTimes(1);
     // The three channels `/bots` itself holds, because the panel now reads
     // through the same hook (FEAT-114). The socket is shared and ref-counted
@@ -304,7 +304,7 @@ describe("the account dock", () => {
   it("hands the whole panel to a lone section, with no seam to drag", async () => {
     localStorage.setItem(DESK_SPLIT_KEY, "0.7");
     await render();
-    await click(tab("Execution"));
+    await click(tab("Activity"));
 
     // One pane means one occupant: it takes the panel whatever the stored
     // split says, and a handle under it would drag against a header.
@@ -357,7 +357,7 @@ describe("the account dock", () => {
   it("comes back on the desk the agent panel took it from", async () => {
     await render();
     await click(tab("Portfolio"));
-    await click(tab("Execution"));
+    await click(tab("Activity"));
 
     // Something else claims the pane. The desk is off screen and its tiles say
     // so — nothing is open to be pressed about.
@@ -370,9 +370,9 @@ describe("the account dock", () => {
     // Either tile brings back both, because both is where it was left. A click
     // on an unpressed tile can only mean "show me this" — it must never quietly
     // turn a section off on the way in.
-    await click(tab("Execution"));
+    await click(tab("Activity"));
     expect(tab("Portfolio").getAttribute("aria-pressed")).toBe("true");
-    expect(tab("Execution").getAttribute("aria-pressed")).toBe("true");
+    expect(tab("Activity").getAttribute("aria-pressed")).toBe("true");
   });
 
   it("forgets the desk when the panel's own Close says so", async () => {
@@ -410,7 +410,7 @@ describe("the account dock", () => {
 
   it("survives a reload, and nothing else", async () => {
     await render();
-    await click(tab("Execution"));
+    await click(tab("Activity"));
 
     expect(JSON.parse(localStorage.getItem(ACCOUNT_DOCK_KEY)!)).toEqual([
       "execution",
@@ -422,7 +422,7 @@ describe("the account dock", () => {
     await act(() => root.unmount());
     root = createRoot(container);
     await render();
-    expect(tab("Execution").getAttribute("aria-pressed")).toBe("true");
+    expect(tab("Activity").getAttribute("aria-pressed")).toBe("true");
     expect(tab("Portfolio").getAttribute("aria-pressed")).toBe("false");
     expect(paneHost()!.contains(column()!)).toBe(true);
   });
@@ -444,7 +444,7 @@ describe("the account dock", () => {
     await render(null);
 
     expect(tab("Portfolio").disabled).toBe(true);
-    expect(tab("Execution").disabled).toBe(true);
+    expect(tab("Activity").disabled).toBe(true);
     expect(tab("Portfolio").title).toBe(
       "Select a server to see your portfolio",
     );
@@ -501,7 +501,7 @@ describe("the desk's Loops section (FEAT-1xx)", () => {
     await render();
 
     await click(tab("Portfolio"));
-    await click(tab("Execution"));
+    await click(tab("Activity"));
     await click(tab("Loops"));
 
     expect(tab("Loops").getAttribute("aria-pressed")).toBe("true");

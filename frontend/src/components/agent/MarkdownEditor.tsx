@@ -65,7 +65,7 @@ export function MarkdownEditor({
         <button
           onClick={() => saveMut.mutate()}
           disabled={!dirty || saveMut.isPending}
-          className="flex items-center gap-1.5 rounded-lg bg-[var(--color-primary)] px-3 py-1.5 text-xs font-semibold text-white transition-all disabled:opacity-30"
+          className="flex items-center gap-1.5 rounded-lg bg-[var(--color-primary-fill)] px-3 py-1.5 text-xs font-semibold text-[var(--on-primary)] transition-all disabled:opacity-30"
         >
           <Save className="h-3.5 w-3.5" />
           {saveMut.isPending ? "Saving..." : "Save"}

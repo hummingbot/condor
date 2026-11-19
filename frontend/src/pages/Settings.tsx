@@ -6,6 +6,7 @@ import {
   LogOut,
   Mic,
   Network,
+  Palette,
   Server,
   ServerCog,
   Shield,
@@ -17,6 +18,7 @@ import { useSearchParams } from "react-router-dom";
 
 import { AdminSettings } from "@/components/settings/AdminSettings";
 import { AgentsSettings } from "@/components/settings/AgentsSettings";
+import { AppearanceSettings } from "@/components/settings/AppearanceSettings";
 import { ApiKeysSettings } from "@/components/settings/ApiKeysSettings";
 import { ApiServerSettings } from "@/components/settings/ApiServerSettings";
 import { CustomProvidersSettings } from "@/components/settings/CustomProvidersSettings";
@@ -40,6 +42,7 @@ type TabKey =
   | "llm"
   | "voice"
   | "notifications"
+  | "appearance"
   | "privacy"
   | "admin"
   | "updates";
@@ -83,6 +86,7 @@ function buildGroups(server: string | null, isAdmin: boolean): TabGroup[] {
       label: "Account",
       tabs: [
         { key: "notifications", label: "Notifications", icon: Bell },
+        { key: "appearance", label: "Appearance", icon: Palette },
         { key: "privacy", label: "Privacy", icon: Shield },
       ],
     },
@@ -184,7 +188,7 @@ export function Settings() {
                       aria-current={active ? "page" : undefined}
                       className={`flex w-full items-center gap-2.5 rounded-md px-3 py-1.5 text-left text-sm font-medium transition-colors ${
                         active
-                          ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                          ? "bg-[var(--color-primary-fill)]/15 text-[var(--color-primary)]"
                           : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
                       }`}
                     >
@@ -208,6 +212,7 @@ export function Settings() {
           {tab === "llm" && <CustomProvidersSettings />}
           {tab === "voice" && <VoiceSettings />}
           {tab === "notifications" && <NotificationsSettings />}
+          {tab === "appearance" && <AppearanceSettings />}
           {/* Two cards, not one switch. Telemetry is anonymous counts the admin
               consents to install-wide; sharing is content only its author can hand
               over. They are different promises, and merging the controls would

@@ -1,26 +1,70 @@
 @import "tailwindcss";
+@import "./styles/hummingbot-ds.css";
 
-/* ── Dark Mode: Deep Space + Gold ── */
+/* ── Typefaces: Botcamp's (Hummingbot Foundation) ──
+   Satoshi for text, Geist Mono for figures-in-code, the eyebrow and fences.
+   Self-hosted from src/assets/fonts — never a font CDN: this dashboard runs on
+   a LAN or a VPS behind auth, and a third-party request on first paint is both
+   a leak and a stall. Both files are variable, so one request covers every
+   weight. Satoshi carries `tnum`, so `tabular-nums` still lines prices up. */
+@font-face {
+  font-family: "Satoshi";
+  src: url("./assets/fonts/Satoshi-Variable.ttf") format("truetype-variations");
+  font-weight: 300 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Geist Mono";
+  src: url("./assets/fonts/GeistMonoVF.woff") format("woff");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* ── Design foundations ──
+   Type scale (nothing below 11px — `text-[8px]`…`text-[10px]` are retired):
+     text-2xs 11px  meta, table headers, eyebrow labels (uppercase)
+     text-xs  12px  secondary text, dense controls
+     text-md  13px  default UI text in panels, buttons, inputs
+     text-sm  14px  body copy, prominent controls
+     text-lg  18px  section / card titles
+     text-xl  20px  page titles
+     text-2xl 24px  KPI values
+   Radius: rounded-md (6px) for controls, rounded-lg (8px) for cards/panels,
+   rounded-full for pills and dots. Nothing else.
+   The shared components in components/ui/ encode these; prefer them. */
+@theme {
+  /* `font-sans` / `font-mono` utilities follow the faces loaded above. */
+  --font-sans: "Satoshi", system-ui, -apple-system, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
+  --text-md: 0.8125rem;
+  --text-md--line-height: 1.25rem;
+}
+
+/* ── Dark Mode: Hummingbot DS (ink + Condor Gold) ── */
 :root,
 [data-theme="dark"] {
-  --color-bg: #080c18;
-  --color-surface: #0f1525;
-  --color-surface-hover: #161e34;
-  --color-border: #1c2541;
-  --color-border-hover: #2a3558;
-  --color-text: #e8e6e3;
-  --color-text-muted: #7b8ba4;
-  --color-accent: #d4a845;
-  --color-primary: #d4a845;
-  --color-primary-hover: #e6be5a;
-  --color-green: #22c55e;
-  --color-red: #ef4444;
-  --color-yellow: #eab308;
+  --color-bg: hsl(var(--background));
+  --color-surface: hsl(var(--card));
+  --color-surface-hover: hsl(var(--muted));
+  --color-border: hsl(var(--border));
+  --color-border-hover: var(--ink-700);
+  --color-text: hsl(var(--foreground));
+  --color-text-muted: hsl(var(--muted-foreground));
+  --color-accent: hsl(var(--primary));
+  --color-primary: hsl(var(--primary));
+  --color-primary-hover: var(--hb-yellow);
+  --color-green: hsl(var(--success));
+  --color-red: hsl(var(--error));
+  --color-yellow: hsl(var(--warning));
 
   /* Chart-specific */
-  --chart-bg: #0f1525;
-  --chart-grid: #1c2541;
-  --chart-text: #6b7994;
+  --chart-bg: hsl(var(--card));
+  --chart-grid: hsl(var(--border));
+  --chart-text: hsl(var(--muted-foreground));
   --chart-up: #22c55e;
   --chart-down: #ef4444;
 
@@ -63,33 +107,44 @@
      `--on-primary` is what may be written on `--color-primary`. White on the
      gold is 2.22:1 here and 3.26:1 in light — both under the 4.5:1 floor,
      which is why neither theme may spell it `text-white`. */
-  --chat-inset: #121a2e;
-  --chat-rule: #1c2541;
-  --on-primary: #080c18;
+  --chat-inset: var(--ink-900);
+  --chat-rule: hsl(var(--border));
+  --on-primary: hsl(var(--primary-foreground));
+
+  --color-warning: var(--color-yellow);
+
+  /* The current page in the top nav — the theme's primary, solid, as in
+     Botcamp's sidebar (`bg-primary text-primary-foreground`): bright gold
+     here, deep gold in light. */
+  /* Gold as a *fill* — a solid button, the current nav item, an active pill's
+     wash. Here it is the primary itself; light splits the two (see there). */
+  --color-primary-fill: var(--color-primary);
+  --color-nav-active: var(--color-primary-fill);
+  --on-nav-active: var(--on-primary);
 
   color-scheme: dark;
 }
 
-/* ── Light Mode: Clean Tech + Gold ── */
+/* ── Light Mode: Hummingbot DS (warm paper + Condor Gold) ── */
 [data-theme="light"] {
-  --color-bg: #f5f6fa;
-  --color-surface: #ffffff;
-  --color-surface-hover: #eef0f7;
-  --color-border: #d8dce8;
-  --color-border-hover: #b8c0d8;
-  --color-text: #141727;
-  --color-text-muted: #6b7280;
-  --color-accent: #b8860b;
-  --color-primary: #b8860b;
-  --color-primary-hover: #d4a845;
-  --color-green: #16a34a;
-  --color-red: #dc2626;
-  --color-yellow: #ca8a04;
+  --color-bg: hsl(var(--background));
+  --color-surface: hsl(var(--card));
+  --color-surface-hover: hsl(var(--muted));
+  --color-border: hsl(var(--border));
+  --color-border-hover: var(--ink-300);
+  --color-text: hsl(var(--foreground));
+  --color-text-muted: hsl(var(--muted-foreground));
+  --color-accent: hsl(var(--primary));
+  --color-primary: hsl(var(--primary));
+  --color-primary-hover: var(--condor-gold-deep);
+  --color-green: hsl(var(--success));
+  --color-red: hsl(var(--error));
+  --color-yellow: hsl(var(--warning));
 
   /* Chart-specific */
-  --chart-bg: #ffffff;
-  --chart-grid: #e5e7eb;
-  --chart-text: #9ca3af;
+  --chart-bg: hsl(var(--card));
+  --chart-grid: var(--ink-200);
+  --chart-text: var(--ink-400);
   --chart-up: #16a34a;
   --chart-down: #dc2626;
 
@@ -114,77 +169,68 @@
   /* Chat surfaces — recessed *down* from the page here, which is the bug
      READ-293 came from: the fence used to reuse `--color-bg` and so sat
      lighter than the container it was nested in. */
-  --chat-inset: #e9ecf5;
-  --chat-rule: #d8dce8;
-  --on-primary: #1a1204;
+  --chat-inset: var(--ink-100);
+  --chat-rule: hsl(var(--border));
+  --on-primary: hsl(var(--primary-foreground));
+
+  --color-warning: var(--color-yellow);
+
+  /* Gold split in two. As text or a border on paper it must be deep to be
+     read (`--color-primary`, ~3.3:1); as a fill it can be Condor's own bright
+     gold, with ink on it (~12:1). One deep gold for both made every gold
+     moment in light read as mustard next to the dark theme's. */
+  --color-primary-fill: var(--condor-gold);
+  --color-nav-active: var(--color-primary-fill);
+  --on-nav-active: var(--ink-950);
 
   color-scheme: light;
 }
 
-/* ── Color-blind Mode: Blue/Orange (deuteranopia/protanopia safe) ── */
-[data-theme="colorblind"] {
-  --color-bg: #0a0e1a;
-  --color-surface: #111729;
-  --color-surface-hover: #1a2138;
-  --color-border: #1e2a45;
-  --color-border-hover: #2c3d63;
-  --color-text: #e8e6e3;
-  --color-text-muted: #7b8ba4;
+/* ── Colour-blind palette: Blue/Orange (deuteranopia/protanopia safe) ──
+   Not a theme: an overlay toggled in Settings → Appearance that sits on top of
+   light or dark (`<html data-theme="…" data-colorblind>`, hooks/useTheme.ts).
+   It only swaps the semantic hues — gains/losses become blue/orange and the
+   gold primary becomes blue — so surfaces, text and the categorical chart
+   series stay those of the theme underneath (already CVD-validated). Hues are
+   Okabe-Ito; the light steps are darkened to hold text contrast on white. */
+:root[data-colorblind],
+[data-theme="dark"][data-colorblind] {
+  --color-primary-fill: var(--color-primary);
   --color-accent: #56b4e9;
   --color-primary: #56b4e9;
   --color-primary-hover: #7ec8f0;
-  --color-green: #0072b2;
+  --color-green: #56b4e9;
   --color-red: #e69f00;
   --color-yellow: #f0e442;
-
-  /* Chart-specific */
-  --chart-bg: #111729;
-  --chart-grid: #1e2a45;
-  --chart-text: #7b8ba4;
-  --chart-up: #0072b2;
+  --chart-up: #56b4e9;
   --chart-down: #e69f00;
+  /* White on the light blue is 2.2:1 — ink it, as on gold. */
+  --on-primary: var(--ink-950);
+}
 
-  /* Categorical series, fixed order (chat charts) — same hues as dark, which
-     already clear the CVD separation target on this surface. */
-  --chart-series-1: #3f9ae0;
-  --chart-series-2: #c98200;
-  --chart-series-3: #8a5fd6;
-  --chart-series-4: #0e9e6a;
-
-  /* Series 5-8 (FEAT-112): a fleet has more agents than four, and the floor's
-     chart draws one line each. Not generated hues — the four above are the ones
-     validated for this surface, so these take four *hues the first four do not
-     use* (pink, cyan, red, olive) at the same lightness band, which is the most
-     separation this palette can be extended by honestly. Beyond four series the
-     identifying channel is the legend label, which the floor's legend carries
-     for every line; colour is the hint that ties a line to its row. */
-  --chart-series-5: #d67ba8;
-  --chart-series-6: #3fb8c4;
-  --chart-series-7: #e0685a;
-  --chart-series-8: #9db33f;
-
-  /* Chat surfaces — same direction as dark; `--on-primary` is read on the
-     blue primary, where white is 2.2:1. */
-  --chat-inset: #151d33;
-  --chat-rule: #1e2a45;
-  --on-primary: #0a0e1a;
-
-  color-scheme: dark;
+[data-theme="light"][data-colorblind] {
+  --color-primary-fill: var(--color-primary);
+  --color-accent: #0072b2;
+  --color-primary: #0072b2;
+  --color-primary-hover: #005a8c;
+  --color-green: #0072b2;
+  --color-red: #b85000;
+  --color-yellow: #946200;
+  --chart-up: #0072b2;
+  --chart-down: #d55e00;
+  /* White on #0072b2 is 5.3:1. */
+  --on-primary: #ffffff;
 }
 
 body {
   margin: 0;
   background-color: var(--color-bg);
   color: var(--color-text);
-  /* Inter is shipped, not wished for: `@fontsource-variable/inter` is imported
-     in main.tsx, self-hosted, and declares the family as "Inter Variable".
-     Nothing else may be named here — a stack that lists a font the app does
-     not load renders as the browser default on every machine without it. */
-  font-family:
-    "Inter Variable",
-    system-ui,
-    -apple-system,
-    sans-serif;
+  /* Satoshi is shipped, not wished for: declared by the @font-face above from
+     a file in the repo. Nothing else may be named first — a stack that leads
+     with a font the app does not load renders as the browser default on every
+     machine without it. */
+  font-family: var(--font-sans);
   transition: background-color 0.2s ease, color 0.2s ease;
 }
 
@@ -277,7 +323,7 @@ body {
 }
 
 .chat-markdown code {
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-size: 0.85em;
   background: var(--chat-inset);
   padding: 0.15em 0.35em;
@@ -350,4 +396,22 @@ body {
   margin: 0.5em 0;
   padding-left: 0.75em;
   color: var(--color-text-muted);
+}
+
+/* Tailwind v4 dropped the pointer cursor from buttons (preflight now leaves
+   them at `default`), so nothing clickable in the app showed the hand. Put it
+   back for every button and button-role element, and say "not now" on the
+   disabled ones. */
+@layer base {
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  summary,
+  label[for],
+  select {
+    cursor: pointer;
+  }
+  button:disabled,
+  [role="button"][aria-disabled="true"] {
+    cursor: not-allowed;
+  }
 }

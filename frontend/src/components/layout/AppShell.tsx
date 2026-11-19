@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { Bug, Eye, Moon, Sun } from "lucide-react";
+import { Bug, Moon, Sun } from "lucide-react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 
 import { ChatBubble } from "@/components/chat/ChatBubble";
@@ -19,6 +19,7 @@ import { routeFacts } from "@/lib/pageFacts";
 import { useViewFacts } from "@/lib/viewFacts";
 import { CurrencySelector } from "./CurrencySelector";
 import { NotificationBell } from "./NotificationBell";
+import { GatewayIndicator } from "./GatewayIndicator";
 import { ServerSelector } from "./ServerSelector";
 
 /**
@@ -53,6 +54,8 @@ export function AppShell() {
 function AppShellBody() {
   const { server } = useServer();
   const { pathname, search } = useLocation();
+  // The Hub and an agent's workspace are Agents' pages (see the nav below).
+  const inAgentsSection = pathname === "/hub" || pathname.startsWith("/agents/");
   const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
   const { hasKeys, isLoading: keysLoading, isError: keysError } = useCredentials();
@@ -109,39 +112,50 @@ function AppShellBody() {
     <div className="flex h-screen flex-col">
       {/* Top bar */}
       <header className="flex h-12 shrink-0 items-center border-b border-[var(--color-border)] bg-[var(--color-surface)] px-4">
-        {/* Left: logo + nav */}
-        <div className="flex items-center gap-6">
-          <NavLink to="/" className="flex items-center gap-2 font-bold tracking-tight">
+        {/* Left: logo + nav. `min-w-0 flex-1` so this side gives way when the
+            window narrows, instead of pushing the controls on the right off
+            screen (the bar used to need ~1080px and never shrank). */}
+        <div className="flex min-w-0 flex-1 items-center gap-3 lg:gap-6">
+          <NavLink to="/" className="flex shrink-0 items-center gap-2 font-bold tracking-tight">
             <img src="/condor_old.jpeg" alt="Condor" className="h-6 w-6 rounded-full" />
-            <span className="text-sm">Condor</span>
+            <span className="hidden text-sm sm:inline">Condor</span>
           </NavLink>
 
-          <nav className="flex items-center">
+          {/* Labels drop to icons below ~1120px; past that, the strip scrolls
+              inside its own space rather than overflowing the page. */}
+          <nav className="flex min-w-0 items-center gap-1 overflow-x-auto [scrollbar-width:none]">
             {NAV_ITEMS.map(({ to, icon: Icon, label }) => (
               <NavLink
                 key={to}
                 to={to}
                 end={to === "/"}
+                title={label}
+                aria-label={label}
                 className={({ isActive }) =>
-                  `flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md transition-colors ${
-                    // `end` on `/` is the whole rule: `/hub` has no tab, so
-                    // nothing here lights while the catalogue is open.
-                    isActive
-                      ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                  `flex shrink-0 items-center gap-2 rounded-md px-2.5 py-1.5 text-sm font-medium transition-colors min-[1120px]:px-3 ${
+                    // `end` keeps `/` from matching every route, so the Hub and
+                    // an agent's own workspace are claimed for Agents by hand:
+                    // they are Agents' pages, and a nav with nothing lit there
+                    // left the reader with no idea where they were.
+                    // Solid gold with ink for the current page, muted for the
+                    // rest — Botcamp's sidebar (Hummingbot design system).
+                    isActive || (to === "/" && inAgentsSection)
+                      ? "bg-[var(--color-nav-active)] text-[var(--on-nav-active)] shadow-sm"
                       : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
                   }`
                 }
               >
-                <Icon className="h-3.5 w-3.5 shrink-0" />
-                {label}
+                <Icon className="h-4 w-4 shrink-0" />
+                <span className="hidden min-[1120px]:inline">{label}</span>
               </NavLink>
             ))}
           </nav>
         </div>
 
         {/* Right: server selector + controls */}
-        <div className="ml-auto flex items-center gap-3">
+        <div className="ml-3 flex shrink-0 items-center gap-2 lg:gap-3">
           <ServerSelector />
+          <GatewayIndicator />
           <CurrencySelector />
 
           <div className="flex items-center gap-1">
@@ -163,15 +177,12 @@ function AppShellBody() {
             <button
               onClick={toggleTheme}
               className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-accent)]"
-              title={
-                theme === "dark" ? "Switch to light mode" :
-                theme === "light" ? "Switch to color-blind mode" :
-                "Switch to dark mode"
-              }
+              title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+              aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
             >
-              {theme === "dark" ? <Sun className="h-4 w-4" /> :
-               theme === "light" ? <Eye className="h-4 w-4" /> :
-               <Moon className="h-4 w-4" />}
+              {/* Light/dark only — the colour-blind palette lives in
+                  Settings → Appearance, so this never reads as a third theme. */}
+              {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
             </button>
 
           </div>

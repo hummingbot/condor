@@ -68,7 +68,7 @@ export function VoiceSettings() {
               key={key}
               className={`flex cursor-pointer items-center gap-3 rounded-lg border px-3 py-2 transition-colors ${
                 form.whisper_model === key
-                  ? "border-[var(--color-primary)]/50 bg-[var(--color-primary)]/5"
+                  ? "border-[var(--color-primary)]/50 bg-[var(--color-primary-fill)]/5"
                   : "border-[var(--color-border)] hover:bg-[var(--color-surface-hover)]"
               }`}
             >
@@ -142,7 +142,7 @@ export function VoiceSettings() {
       <button
         onClick={handleSave}
         disabled={mutation.isPending}
-        className="flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+        className="flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--color-primary-fill)] px-4 py-2 text-sm font-medium text-[var(--on-primary)] transition-opacity hover:opacity-90 disabled:opacity-50"
       >
         {mutation.isPending ? (
           <Loader2 className="h-4 w-4 animate-spin" />

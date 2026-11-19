@@ -4,15 +4,13 @@ import {
   ChevronDown,
   ChevronRight,
   Wallet,
-  Server,
   BarChart3,
   Layers,
-  KeyRound,
   ArrowUpRight,
   ArrowDownRight,
 } from "lucide-react";
 import { useState, useEffect, useMemo, useCallback } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useSearchParams } from "react-router-dom";
 
 import { ChartState } from "@/components/charts/ChartState";
 import { NoServerCard } from "@/components/NoServerCard";
@@ -115,10 +113,12 @@ function KpiCell({
   return (
     <div className="flex-1 px-5 py-3 min-w-0">
       <span className="text-[11px] uppercase tracking-wider font-medium text-[var(--color-text-muted)]">{label}</span>
-      <div className="flex items-baseline gap-2.5 mt-1">
-        <span className="text-2xl font-bold tabular-nums tracking-tight leading-none">{mainValue}</span>
+      {/* Wraps instead of overflowing: in a narrow cell the PnL drops below the
+          value rather than bleeding into the neighbouring KPI cell. */}
+      <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1 mt-1">
+        <span className="text-2xl font-bold tabular-nums tracking-tight leading-none whitespace-nowrap">{mainValue}</span>
         {pnl !== undefined && pnl !== null && (
-          <span className="inline-flex items-center gap-0.5 text-sm tabular-nums font-semibold"
+          <span className="inline-flex items-center gap-0.5 text-sm tabular-nums font-semibold whitespace-nowrap"
             title={pnlTitle}
             style={{ color: pnl >= 0 ? "var(--color-green)" : "var(--color-red)" }}>
             {pnl >= 0 ? <ArrowUpRight className="h-3.5 w-3.5" /> : <ArrowDownRight className="h-3.5 w-3.5" />}
@@ -126,7 +126,7 @@ function KpiCell({
           </span>
         )}
       </div>
-      <div className="text-xs text-[var(--color-text-muted)] mt-1 truncate">{details}</div>
+      <div className="text-xs text-[var(--color-text-muted)] mt-1 truncate" title={details}>{details}</div>
     </div>
   );
 }
@@ -150,7 +150,6 @@ function DashboardStrip({
   agentsState,
   period,
   onPeriodChange,
-  onNavigate,
   convertFromUsd,
   currencySymbol,
 }: {
@@ -175,15 +174,12 @@ function DashboardStrip({
   agentsState: TileState;
   period: string;
   onPeriodChange: (p: string) => void;
-  onNavigate: (path: string) => void;
   convertFromUsd: (val: number) => number;
   currencySymbol: string;
 }) {
   const activeAgents = agents.filter((a) => a.status === "running" || a.status === "active");
   const agentPnl = agents.reduce((s, a) => s + (a.latest_session_pnl ?? 0), 0);
   const agentSessions = agents.reduce((s, a) => s + (a.session_count ?? 0), 0);
-
-  const btnClass = "flex items-center justify-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[11px] font-medium text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] w-full";
 
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
@@ -236,7 +232,10 @@ function DashboardStrip({
           currencySymbol={currencySymbol}
         />
 
-        {/* ── Period + Quick Links ── */}
+        {/* ── Period ──
+            Keys and Servers used to sit under it: setup links in the middle of
+            the numbers, and the top bar now says which server (and whether
+            its Gateway is up). Both live in Settings. */}
         <div className="flex flex-col justify-center gap-1 px-2.5 py-2 shrink-0 w-[100px]">
           <div className="flex gap-0.5 rounded-md border border-[var(--color-border)] p-0.5 bg-[var(--color-bg)] w-full justify-center">
             {TIME_PERIODS.map((p) => (
@@ -253,14 +252,6 @@ function DashboardStrip({
               </button>
             ))}
           </div>
-          <button onClick={() => onNavigate("/settings?tab=keys")} className={btnClass}>
-            <KeyRound className="h-3 w-3" />
-            Keys
-          </button>
-          <button onClick={() => onNavigate("/settings?tab=servers")} className={btnClass}>
-            <Server className="h-3 w-3" />
-            Servers
-          </button>
         </div>
       </div>
     </div>
@@ -834,7 +825,6 @@ type PortfolioTab = "assets" | "positions";
 
 export function Portfolio() {
   const { server } = useServer();
-  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [period, setPeriod] = useState<string>("1W");
 
@@ -1090,7 +1080,6 @@ export function Portfolio() {
         agentsState={tileState(agentsListQuery)}
         period={period}
         onPeriodChange={setPeriod}
-        onNavigate={navigate}
         convertFromUsd={convertFromUsd}
         currencySymbol={currencySymbol}
       />

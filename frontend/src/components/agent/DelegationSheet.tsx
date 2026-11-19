@@ -83,7 +83,7 @@ export function DelegationSheet({
             onClick={() => setView(id)}
             className={`rounded-md px-3 py-1.5 text-xs font-medium capitalize transition-all ${
               view === id
-                ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                ? "bg-[var(--color-primary-fill)]/15 text-[var(--color-primary)]"
                 : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
             }`}
           >

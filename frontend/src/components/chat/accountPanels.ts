@@ -53,7 +53,7 @@ export const PANELS: {
   },
   {
     id: "execution",
-    label: "Execution",
+    label: "Activity",
     Icon: Cpu,
     hint: "Every controller deployed — what it has done, and pause or start it",
     disabledHint: "Select a server to see what is deployed",
@@ -256,6 +256,16 @@ export function useAccountPanels({
     onOpenChange(false);
   };
 
+  /**
+   * Put exactly this one section on screen — the layout picker's "Panel 1"
+   * choice, where the reader is naming what fills the slot rather than
+   * adding to what is already there.
+   */
+  const showOnly = (id: PanelId) => {
+    write([id]);
+    onOpenChange(true);
+  };
+
   // A section is only reachable with a server to ask about: a disclosure that
   // opens onto a column of zeroes is worse than a control that says why it is
   // dead. Anything left open from a previous server stays recorded and comes
@@ -281,5 +291,14 @@ export function useAccountPanels({
     }),
   );
 
-  return { shown, toggle, close, railItems };
+  /**
+   * `showOnly` and `close` without touching the pane, for a caller that has
+   * already moved it (the layout picker, once the unsaved-edits guard said
+   * yes). Moving it twice pushed two identical history entries, so Back had to
+   * be pressed twice to leave.
+   */
+  const keepOnly = (id: PanelId) => write([id]);
+  const forget = () => write([]);
+
+  return { shown, toggle, close, showOnly, keepOnly, forget, railItems };
 }

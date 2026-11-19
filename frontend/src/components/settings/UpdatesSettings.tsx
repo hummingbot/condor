@@ -246,7 +246,7 @@ export function UpdatesSettings() {
         <button
           onClick={() => preflightMut.mutate(stale.map((c) => c.key))}
           disabled={preflightMut.isPending}
-          className="w-full rounded-lg bg-[var(--color-primary)]/15 px-3 py-2 text-sm font-medium text-[var(--color-primary)] transition-opacity hover:opacity-80 disabled:opacity-50"
+          className="w-full rounded-lg bg-[var(--color-primary-fill)]/15 px-3 py-2 text-sm font-medium text-[var(--color-primary)] transition-opacity hover:opacity-80 disabled:opacity-50"
         >
           Update all ({stale.length})
         </button>
@@ -295,7 +295,7 @@ function ComponentCard({
           <button
             onClick={onUpdate}
             disabled={isPending}
-            className="flex shrink-0 items-center gap-1.5 rounded-md bg-[var(--color-primary)]/15 px-3 py-1.5 text-xs font-medium text-[var(--color-primary)] transition-opacity hover:opacity-80 disabled:opacity-50"
+            className="flex shrink-0 items-center gap-1.5 rounded-md bg-[var(--color-primary-fill)]/15 px-3 py-1.5 text-xs font-medium text-[var(--color-primary)] transition-opacity hover:opacity-80 disabled:opacity-50"
           >
             <ArrowUpCircle className="h-3.5 w-3.5" />
             Update
@@ -463,7 +463,7 @@ function PreflightView({
           onClick={onStart}
           disabled={!preflight.ok || isStarting}
           title={preflight.ok ? undefined : "Resolve the blockers first"}
-          className="flex-1 rounded-md bg-[var(--color-primary)]/15 px-3 py-2 text-sm font-medium text-[var(--color-primary)] transition-opacity hover:opacity-80 disabled:opacity-40"
+          className="flex-1 rounded-md bg-[var(--color-primary-fill)]/15 px-3 py-2 text-sm font-medium text-[var(--color-primary)] transition-opacity hover:opacity-80 disabled:opacity-40"
         >
           {isStarting ? "Starting..." : "Start update"}
         </button>
@@ -480,7 +480,7 @@ function RunningView({ run, offline }: { run: Run; offline: boolean }) {
           reply for a while. The run is still going; say so rather than letting
           the panel look stuck. */}
       {offline && (
-        <div className="flex items-start gap-2 rounded-lg border border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 p-3 text-xs text-[var(--color-text)]">
+        <div className="flex items-start gap-2 rounded-lg border border-[var(--color-primary)]/40 bg-[var(--color-primary-fill)]/10 p-3 text-xs text-[var(--color-text)]">
           <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-[var(--color-primary)]" />
           <span>
             Not getting an answer right now — this page keeps trying and picks

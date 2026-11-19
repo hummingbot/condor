@@ -177,7 +177,7 @@ export function LPConfigPanel({
                 </span>
               )}
               {state.poolTouched && (
-                <span className="rounded bg-[var(--color-primary)]/15 px-1.5 py-0.5 text-[var(--color-primary)]">
+                <span className="rounded bg-[var(--color-primary-fill)]/15 px-1.5 py-0.5 text-[var(--color-primary)]">
                   overridden
                 </span>
               )}
@@ -224,7 +224,7 @@ export function LPConfigPanel({
               title={opt.hint}
               className={`flex-1 px-2 py-1.5 text-[11px] font-medium transition-colors ${
                 state.side === opt.value
-                  ? "bg-[var(--color-primary)] text-white"
+                  ? "bg-[var(--color-primary-fill)] text-[var(--on-primary)]"
                   : "bg-[var(--color-bg)] text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
               }`}
             >
@@ -258,7 +258,7 @@ export function LPConfigPanel({
               onClick={() => dispatch({ type: "SET_RANGE_PCT", value: pct, price })}
               className={`flex-1 px-1.5 py-1 text-[10px] transition-colors ${
                 state.range_pct === pct
-                  ? "bg-[var(--color-primary)] text-white"
+                  ? "bg-[var(--color-primary-fill)] text-[var(--on-primary)]"
                   : "bg-[var(--color-bg)] text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
               }`}
             >

@@ -597,7 +597,7 @@ describe("/bots — the executors under the fleet", () => {
       [
         routeFacts("/bots", "", qc)!,
         {
-          label: "Bots",
+          label: "Activity",
           onScreen: {
             population: "terminated",
             grouping: "by type",
@@ -1043,7 +1043,7 @@ describe("an empty cache", () => {
     // reader throws on `.filter` of a non-array and the block must stay whole.
     qc.setQueryData(["bots", SRV], { bots: "not an array", controllers: null });
     const facts = routeFacts("/bots", "", qc);
-    expect(facts).toEqual({ label: "Bots" });
+    expect(facts).toEqual({ label: "Activity" });
   });
 
   it("gathers nothing at all on /settings (R9)", () => {
@@ -1318,7 +1318,7 @@ describe("the block's budget", () => {
       [
         routeFacts("/bots", "", qc)!,
         {
-          label: "Bots",
+          label: "Activity",
           onScreen: {
             population: "terminated",
             grouping: "by type",

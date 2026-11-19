@@ -190,7 +190,7 @@ export function FavoritesStrip({
                 dragFrom === i ? "opacity-40" : ""
               } ${
                 active
-                  ? "border-[var(--color-primary)] bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+                  ? "border-[var(--color-primary)] bg-[var(--color-primary-fill)]/10 text-[var(--color-primary)]"
                   : "border-[var(--color-border)] text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
               }`}
             >

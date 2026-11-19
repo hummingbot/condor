@@ -226,7 +226,7 @@ export function NotificationBell() {
               onClick={() => openItem(n)}
               className={`flex w-full items-start gap-2.5 px-3 py-2 text-left transition-colors hover:bg-[var(--color-surface-hover)] ${
                 n.link ? "cursor-pointer" : "cursor-default"
-              } ${n.read ? "" : "bg-[var(--color-primary)]/5"}`}
+              } ${n.read ? "" : "bg-[var(--color-primary-fill)]/5"}`}
             >
               <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]" />
               <span className="min-w-0 flex-1">
@@ -241,7 +241,7 @@ export function NotificationBell() {
                 </span>
               </span>
               {!n.read && (
-                <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--color-primary)]" />
+                <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--color-primary-fill)]" />
               )}
             </button>
           );

@@ -13,7 +13,7 @@ export function ConnectKeysOverlay() {
       <div className="relative z-10 mx-4 w-full max-w-md rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-8 shadow-2xl shadow-black/20">
         <div className="flex flex-col items-center text-center">
           {/* Icon */}
-          <div className="mb-5 flex h-16 w-16 items-center justify-center rounded-2xl bg-[var(--color-primary)]/10 ring-1 ring-[var(--color-primary)]/20">
+          <div className="mb-5 flex h-16 w-16 items-center justify-center rounded-2xl bg-[var(--color-primary-fill)]/10 ring-1 ring-[var(--color-primary)]/20">
             <KeyRound className="h-8 w-8 text-[var(--color-primary)]" />
           </div>
 
@@ -29,7 +29,7 @@ export function ConnectKeysOverlay() {
           {/* CTA */}
           <button
             onClick={() => navigate("/settings?tab=keys")}
-            className="flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-6 py-2.5 text-sm font-semibold text-white transition-all hover:bg-[var(--color-primary-hover)] hover:shadow-lg hover:shadow-[var(--color-primary)]/20 active:scale-[0.98]"
+            className="flex items-center gap-2 rounded-lg bg-[var(--color-primary-fill)] px-6 py-2.5 text-sm font-semibold text-[var(--on-primary)] transition-all hover:bg-[var(--color-primary-hover)] hover:shadow-lg hover:shadow-[var(--color-primary)]/20 active:scale-[0.98]"
           >
             Connect Keys &amp; Wallets
             <ArrowRight className="h-4 w-4" />
