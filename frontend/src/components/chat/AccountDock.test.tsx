@@ -182,7 +182,11 @@ async function render(
       <MemoryRouter>
         <QueryClientProvider client={qc}>
           {warm && server && <PortfolioPageQuery server={server} />}
-          <Desk server={server} loopsCount={loopsCount} onOpenLoop={onOpenLoop} />
+          <Desk
+            server={server}
+            loopsCount={loopsCount}
+            onOpenLoop={onOpenLoop}
+          />
         </QueryClientProvider>
       </MemoryRouter>,
     );
@@ -351,7 +355,8 @@ describe("the account dock", () => {
     // No empty panel with two collapsed headers in it, and the pane is free
     // for whatever the reader opens next.
     expect(column()).toBeNull();
-    expect(paneHost()!.className).toContain("hidden");
+    // The column around the pane is what hides; the host itself stays mounted.
+    expect(paneHost()!.parentElement!.className).toContain("hidden");
   });
 
   it("comes back on the desk the agent panel took it from", async () => {
