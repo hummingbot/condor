@@ -1309,6 +1309,82 @@
         "type": "object"
       }
     },
+    "close_position": {
+      "description": "Flatten an open perpetual position with a reduce-only market order.\n\n    Closing does not need an executor, and it must not depend on one: stopping\n    an executor can leave the position behind (``keep_position``), and a session\n    that stops its executors while positions stay open leaves leveraged exposure\n    with no barrier on the venue. Call this per position at shutdown, then\n    re-read positions to prove the book is flat.\n\n    Args:\n        account_name: Account holding the position\n        connector_name: Perpetual connector (e.g. gate_io_perpetual)\n        trading_pair: Pair to flatten\n        amount: Base amount; defaults to the whole position\n        side: \"LONG\" or \"SHORT\". Required when the pair holds both at once (a\n            HEDGE-mode account): closing by pair alone would take the first leg\n            and could leave the one you meant to close open.\n        controller_id: Your controller/session id. Required to close a position\n            that a live executor still owns -- see below.\n\n    OWNERSHIP: a position is account-scoped, not session-scoped, so closing by\n    connector and pair alone would let one strategy flatten another's book on a\n    shared account. The check is therefore on what is still running: while a\n    live executor owns this pair, the close is refused unless `controller_id`\n    matches it -- stop that executor instead, which is ownership-checked. Once\n    nothing is running on the pair, the position is exactly the leftover this\n    tool exists to flatten (an executor stopped with `keep_position`, or one\n    that died), and closing it is the safe action.\n\n    Returns:\n        Human-readable result including the order id\n    ",
+      "inputSchema": {
+        "properties": {
+          "account_name": {
+            "title": "Account Name",
+            "type": "string"
+          },
+          "amount": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Amount"
+          },
+          "connector_name": {
+            "title": "Connector Name",
+            "type": "string"
+          },
+          "controller_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Controller Id"
+          },
+          "side": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Side"
+          },
+          "trading_pair": {
+            "title": "Trading Pair",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account_name",
+          "connector_name",
+          "trading_pair"
+        ],
+        "title": "close_positionArguments",
+        "type": "object"
+      },
+      "name": "close_position",
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "title": "Result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "close_positionOutput",
+        "type": "object"
+      }
+    },
     "configure_server": {
       "description": "Configure the active Hummingbot API server connection.\n\n    This tool manages a single API server connection:\n    1. No parameters \u2192 Show the current server configuration\n    2. Any parameters \u2192 Update the server config and reconnect\n\n    Only the provided parameters are changed; omitted ones keep their current values.\n\n    Args:\n        name: Server label (e.g., 'macmini', 'production')\n        host: API host (e.g., 'localhost', 'host.docker.internal', '72.212.424.42')\n        port: API port (e.g., 8000)\n        username: API username\n        password: API password\n    ",
       "inputSchema": {

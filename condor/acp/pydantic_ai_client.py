@@ -33,6 +33,44 @@ from .usage import TokenUsage
 
 log = logging.getLogger(__name__)
 
+
+def _usage_limits():
+    """Request budget for one agent turn, from ``CONDOR_ACP_REQUEST_LIMIT``.
+
+    pydantic_ai defaults ``request_limit`` to 50. A real agent tick -- read the
+    playbook, reconcile the venue, plan, deploy -- spends more than that, and
+    every tool call is a model request, so the tick died mid-turn with
+    UsageLimitExceeded.
+
+    The variable is read as follows, and this is exactly what the code does:
+
+    ====================  ==========================================================
+    unset or blank        400 -- a budget that finishes a real tick
+    positive integer      that many requests
+    ``0`` or negative     no cap at all (``request_limit=None``), documented rather
+                          than implied: it is a deliberate "run until the model
+                          stops", not a way to restore pydantic_ai's 50
+    non-numeric           falls back to 400, like unset
+    ====================  ==========================================================
+    """
+    from pydantic_ai.usage import UsageLimits
+
+    raw = (os.environ.get("CONDOR_ACP_REQUEST_LIMIT") or "").strip()
+    if not raw:
+        limit: int | None = 400
+    else:
+        try:
+            value = int(raw)
+        except ValueError:
+            limit = 400
+        else:
+            # 0 or negative is the explicit "no cap" spelling. It is NOT how an
+            # operator restores pydantic_ai's default of 50 -- unsetting the
+            # variable selects 400, and 50 must be written as the number.
+            limit = None if value <= 0 else value
+    return UsageLimits(request_limit=limit)
+
+
 # pydantic-ai 2.x prints an ASCII banner on stderr once per process. Every
 # pydantic-ai import in this module is deferred, so this runs ahead of them all.
 os.environ.setdefault("PYDANTIC_AI_NO_BANNER", "1")
@@ -228,6 +266,29 @@ def _make_openai_compat_model(model_id: str, provider: Any) -> Any:
         _NULL_SAFE_MODEL_CLS = _NullContentSafeOpenAIChatModel
 
     return _NULL_SAFE_MODEL_CLS(model_id, provider=provider)
+
+
+def _apply_arg_patch(part: Any, result: Any) -> None:
+    """Write the gate's corrections into the arguments the tool will receive.
+
+    A provider that sends ``args`` as a JSON string is the trap here: parsing it
+    to inspect (``_tool_args_to_dict``) hands back a new dict, so edits to that
+    copy never reached the call. Rewrite the string in place for that case.
+    """
+    if not isinstance(result, dict):
+        return
+    patch = result.get("patch")
+    if not isinstance(patch, dict) or not patch:
+        return
+    current = _tool_args_to_dict(getattr(part, "args", None)) or {}
+    merged = {**current, **patch}
+    if isinstance(getattr(part, "args", None), str):
+        part.args = json.dumps(merged)
+    elif isinstance(getattr(part, "args", None), dict):
+        part.args.clear()
+        part.args.update(merged)
+    else:
+        part.args = merged
 
 
 def _tool_args_to_dict(args: Any) -> dict | None:
@@ -1188,6 +1249,7 @@ class PydanticAIClient:
                     self._agent.iter(
                         self._build_user_prompt(text, images),
                         message_history=self._message_history,
+                        usage_limits=_usage_limits(),
                     ) as run,
                     self._usage_counted(run),
                 ):
@@ -1446,6 +1508,8 @@ class PydanticAIClient:
             approved = False
             reason = f"permission check failed ({exc})"
 
+        if approved:
+            _apply_arg_patch(part, result)
         self._permission_gate.record(part.tool_call_id, tool_name, approved, reason)
         return approved, reason
 

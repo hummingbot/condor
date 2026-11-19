@@ -300,6 +300,131 @@ async def set_account_position_mode_and_leverage(
     return response.strip()
 
 
+@handle_errors("close position")
+async def close_position(
+    account_name: str,
+    connector_name: str,
+    trading_pair: str,
+    amount: float | None = None,
+    side: str | None = None,
+    controller_id: str | None = None,
+) -> str:
+    """Flatten an open perpetual position with a reduce-only market order.
+
+    Closing does not need an executor, and it must not depend on one: stopping
+    an executor can leave the position behind (``keep_position``), and a session
+    that stops its executors while positions stay open leaves leveraged exposure
+    with no barrier on the venue. Call this per position at shutdown, then
+    re-read positions to prove the book is flat.
+
+    Args:
+        account_name: Account holding the position
+        connector_name: Perpetual connector (e.g. gate_io_perpetual)
+        trading_pair: Pair to flatten
+        amount: Base amount; defaults to the whole position
+        side: "LONG" or "SHORT". Required when the pair holds both at once (a
+            HEDGE-mode account): closing by pair alone would take the first leg
+            and could leave the one you meant to close open.
+        controller_id: Your controller/session id. Required to close a position
+            that a live executor still owns -- see below.
+
+    OWNERSHIP: a position is account-scoped, not session-scoped, so closing by
+    connector and pair alone would let one strategy flatten another's book on a
+    shared account. The check is therefore on what is still running: while a
+    live executor owns this pair, the close is refused unless `controller_id`
+    matches it -- stop that executor instead, which is ownership-checked. Once
+    nothing is running on the pair, the position is exactly the leftover this
+    tool exists to flatten (an executor stopped with `keep_position`, or one
+    that died), and closing it is the safe action.
+
+    Returns:
+        Human-readable result including the order id
+    """
+    client = await hummingbot_client.get_client()
+    raw = await client.trading.get_positions(
+        account_names=[account_name], connector_names=[connector_name]
+    )
+    rows = raw.get("data", raw) if isinstance(raw, dict) else raw
+    wanted = (side or "").strip().upper()
+    legs = [
+        p
+        for p in (rows or [])
+        if str(p.get("trading_pair")) == trading_pair
+        and str(p.get("connector_name")) == connector_name
+    ]
+    if wanted:
+        legs = [p for p in legs if str(p.get("side", "")).upper() == wanted]
+        if not legs:
+            return (
+                f"No open {wanted} {trading_pair} position on {connector_name} "
+                f"({account_name})."
+            )
+    if not legs:
+        return f"No open {trading_pair} position on {connector_name} ({account_name})."
+    if len(legs) > 1:
+        # HEDGE mode: both directions can be open on one pair. Guessing here
+        # closes the wrong leg and leaves the intended one exposed.
+        held = ", ".join(str(p.get("side", "?")).upper() for p in legs)
+        return (
+            f"{trading_pair} holds more than one position ({held}). Pass "
+            'side="LONG" or side="SHORT" to say which to close.'
+        )
+    match = legs[0]
+
+    # Who is still running on this pair? Read it before closing anything.
+    try:
+        listed = await executors_tools.list_executors(
+            client,
+            account_names=[account_name],
+            connector_names=[connector_name],
+            trading_pairs=[trading_pair],
+        )
+    except Exception as exc:  # noqa: BLE001 - fail closed, never close blind
+        return (
+            f"Refusing to close {trading_pair}: could not read which executors "
+            f"own it ({exc})."
+        )
+    if listed.get("error"):
+        return (
+            f"Refusing to close {trading_pair}: could not read which executors "
+            f"own it ({listed['error']})."
+        )
+    terminal = {"TERMINATED", "FAILED", "COMPLETED", "CLOSED", "STOPPED", "CANCELLED"}
+    owners = set()
+    for row in listed.get("executors") or []:
+        status = str(row.get("status") or "").upper()
+        if status in terminal:
+            continue
+        owner = str(row.get("controller_id") or "").strip()
+        owners.add(owner)  # empty means "unattributed but live"
+    mine = (controller_id or "").strip()
+    if owners and mine not in owners:
+        named = ", ".join(sorted(o or "<unattributed>" for o in owners))
+        return (
+            f"{trading_pair} is owned by a live executor (controller: {named}). "
+            "Pass controller_id=<yours> if it is your position, or stop that "
+            "executor instead -- stopping is ownership-checked, closing by pair "
+            "is not."
+        )
+
+    held = abs(float(match.get("amount") or 0))
+    size = float(amount) if amount is not None else held
+    if size <= 0:
+        return f"{trading_pair} reads a zero position size; nothing to close."
+    side = "SELL" if str(match.get("side", "")).upper() == "LONG" else "BUY"
+    order = await client.trading.place_order(
+        account_name=account_name,
+        connector_name=connector_name,
+        trading_pair=trading_pair,
+        trade_type=side,
+        amount=size,
+        order_type="MARKET",
+        position_action="CLOSE",
+    )
+    order_id = (order or {}).get("order_id", "?")
+    return f"Closed {trading_pair} {str(match.get('side','')).upper()} {size} on {connector_name} — order {order_id}"
+
+
 @handle_errors("search history")
 async def search_history(
     data_type: Literal["orders", "perp_positions", "clmm_positions"],
