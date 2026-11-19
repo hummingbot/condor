@@ -8,6 +8,7 @@ import html
 import logging
 import os
 import re
+import shutil
 from collections.abc import Iterable
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -217,6 +218,14 @@ def _read_index_for_write() -> list[dict]:
     JSON list will not get better on a retry, so it is moved aside as
     ``reports_index.json.corrupt-<timestamp>`` and the index is rebuilt from
     the report files themselves.
+
+    The recovery is durable before it is returned: the corrupt file is
+    *copied* aside and the rebuilt index is then written over it atomically.
+    Moving it aside first left a window where the index was simply missing —
+    if the caller's own write then failed (disk full), the next save read
+    "missing" as ``[]`` and persisted its new report alone, orphaning every
+    recovered one again. Now a failure at any step leaves the corrupt index in
+    place, so the next write retries the whole recovery.
     """
     index_file = _index_file()
     try:
@@ -228,8 +237,9 @@ def _read_index_for_write() -> list[dict]:
         aside = index_file.with_name(
             f"{index_file.name}.corrupt-{datetime.now(timezone.utc):%Y%m%dT%H%M%S}"
         )
-        os.replace(index_file, aside)
+        shutil.copy2(index_file, aside)
         entries = _rebuild_index_from_disk()
+        _write_index(entries)
         logger.error(
             "Report index %s was unreadable (%s); kept as %s and rebuilt %d "
             "entries from the report files",

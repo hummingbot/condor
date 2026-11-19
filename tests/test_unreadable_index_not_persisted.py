@@ -81,6 +81,53 @@ def test_a_corrupt_report_index_is_kept_aside_and_rebuilt_on_save(reports_dir):
     assert reports.get_report_raw_html(first) is not None
 
 
+def test_a_rebuilt_report_index_survives_a_failed_save(reports_dir):
+    """The rebuilt index is on disk before the save that triggered it can fail.
+
+    Moving the corrupt index aside and keeping the rebuild in memory left the
+    index missing; a save failing right after (disk full) meant the next one
+    read "missing" as ``[]`` and listed only itself.
+    """
+    first, second = _save("First"), _save("Second")
+    index_file = store._index_file()
+    index_file.write_text('[{"id": "trunca', encoding="utf-8")
+
+    def _disk_full(path, content):
+        raise OSError(28, "No space left on device")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(store, "_write_report_html", _disk_full)
+        with pytest.raises(OSError):
+            _save("Doomed")
+
+    assert {entry["id"] for entry in store._read_index()} == {first, second}
+    aside = list(index_file.parent.glob(index_file.name + ".corrupt-*"))
+    assert len(aside) == 1
+    assert aside[0].read_text(encoding="utf-8") == '[{"id": "trunca'
+
+    third = _save("Third")
+    assert {entry["id"] for entry in store._read_index()} == {first, second, third}
+
+
+def test_a_failed_rebuild_write_leaves_the_corrupt_index_to_retry(reports_dir):
+    first = _save("First")
+    index_file = store._index_file()
+    index_file.write_text("{garbage", encoding="utf-8")
+
+    def _disk_full(entries):
+        raise OSError(28, "No space left on device")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(store, "_write_index", _disk_full)
+        with pytest.raises(OSError):
+            _save("Doomed")
+
+    # Still corrupt, never missing: the next save recovers again.
+    assert index_file.read_text(encoding="utf-8") == "{garbage"
+    second = _save("Second")
+    assert {entry["id"] for entry in store._read_index()} == {first, second}
+
+
 def test_a_report_index_that_cannot_be_read_blocks_the_write(reports_dir):
     first = _save("First")
     before = store._index_file().read_text(encoding="utf-8")
