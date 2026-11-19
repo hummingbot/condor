@@ -32,6 +32,19 @@ export function setOnUnauthorized(handler: UnauthorizedHandler): () => void {
 }
 
 /**
+ * The longest a 401 waits on the session check before giving up on it.
+ *
+ * `apiFetch` clears its own deadline before reporting (FD-05), so this is what
+ * keeps a request from hanging on a handler that never settles. The handler
+ * bounds its own probes (`AUTH_PROBE_TIMEOUT_MS` in lib/auth.ts); this is the
+ * backstop over all of it, the local re-login included. A check that runs out
+ * counts as "not renewed": the request fails with its 401, and the shared
+ * check is released so the next 401 starts a fresh one instead of joining a
+ * stuck one.
+ */
+export const UNAUTHORIZED_CHECK_TIMEOUT_MS = 30_000;
+
+/**
  * Run the 401 handler, once for however many callers report at the same time:
  * an expired session fails every poll on the page in the same tick, and each
  * of them must not log out (or re-login) on its own (FD-01).
@@ -40,12 +53,17 @@ export function reportUnauthorized(): Promise<boolean> {
   const handler = unauthorizedHandler;
   if (!handler) return Promise.resolve(false);
   if (!unauthorizedInFlight) {
-    unauthorizedInFlight = Promise.resolve()
-      .then(handler)
-      .catch(() => false)
-      .finally(() => {
-        unauthorizedInFlight = null;
-      });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), UNAUTHORIZED_CHECK_TIMEOUT_MS);
+    });
+    unauthorizedInFlight = Promise.race([
+      Promise.resolve().then(handler).catch(() => false),
+      expired,
+    ]).finally(() => {
+      clearTimeout(timer);
+      unauthorizedInFlight = null;
+    });
   }
   return unauthorizedInFlight;
 }

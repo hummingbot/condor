@@ -11,7 +11,12 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { api, errorStatus, setOnUnauthorized } from "./api";
+import {
+  api,
+  errorStatus,
+  setOnUnauthorized,
+  UNAUTHORIZED_CHECK_TIMEOUT_MS,
+} from "./api";
 import { TOKEN_KEY } from "./auth-token";
 
 const json = (status: number, body: unknown = {}) =>
@@ -105,5 +110,30 @@ describe("apiFetch on 401", () => {
   it("throws the 401 as before when no handler is registered", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => json(401, { detail: "Invalid token" })));
     await expect(api.getServers()).rejects.toThrow("Invalid token");
+  });
+
+  it("gives up on a session check that never settles, and starts a fresh one next time", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal("fetch", vi.fn(async () => json(401, { detail: "Invalid token" })));
+      let calls = 0;
+      const handler = vi.fn(() => {
+        calls += 1;
+        // The first check hangs for good; the second answers.
+        return calls === 1 ? new Promise<boolean>(() => {}) : Promise.resolve(false);
+      });
+      unregister = setOnUnauthorized(handler);
+
+      const first = api.getServers();
+      const firstSettled = expect(first).rejects.toMatchObject({ status: 401 });
+      await vi.advanceTimersByTimeAsync(UNAUTHORIZED_CHECK_TIMEOUT_MS);
+      await firstSettled;
+      expect(handler).toHaveBeenCalledTimes(1);
+
+      await expect(api.getServers()).rejects.toMatchObject({ status: 401 });
+      expect(handler).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

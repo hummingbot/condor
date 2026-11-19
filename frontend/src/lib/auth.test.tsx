@@ -14,7 +14,12 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { api } from "./api";
-import { type AuthState, resolveUnauthorized, useAuthState } from "./auth";
+import {
+  AUTH_PROBE_TIMEOUT_MS,
+  type AuthState,
+  resolveUnauthorized,
+  useAuthState,
+} from "./auth";
 import { TOKEN_KEY } from "./auth-token";
 
 declare global {
@@ -167,5 +172,53 @@ describe("resolveUnauthorized", () => {
     });
     await expect(resolveUnauthorized({ loginLocal, logout })).resolves.toBe(false);
     expect(logout).toHaveBeenCalledTimes(1);
+  });
+
+  /** `fetch` that never answers until its signal aborts it. */
+  function hangUntilAborted(_path: string, init?: RequestInit): Promise<Response> {
+    return new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () =>
+        reject(new DOMException("aborted", "AbortError")),
+      );
+    });
+  }
+
+  it("keeps the session when /auth/me never answers", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal("fetch", vi.fn(hangUntilAborted));
+      const logout = vi.fn();
+      const loginLocal = vi.fn(async () => {});
+      const outcome = resolveUnauthorized({ loginLocal, logout });
+      await vi.advanceTimersByTimeAsync(AUTH_PROBE_TIMEOUT_MS);
+      await expect(outcome).resolves.toBe(false);
+      expect(logout).not.toHaveBeenCalled();
+      expect(loginLocal).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ends a refused session when /auth/mode never answers", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn((path: string, init?: RequestInit) =>
+          path === "/api/v1/auth/me"
+            ? Promise.resolve(json(401))
+            : hangUntilAborted(path, init),
+        ),
+      );
+      const logout = vi.fn();
+      const loginLocal = vi.fn(async () => {});
+      const outcome = resolveUnauthorized({ loginLocal, logout });
+      await vi.advanceTimersByTimeAsync(AUTH_PROBE_TIMEOUT_MS);
+      await expect(outcome).resolves.toBe(false);
+      expect(logout).toHaveBeenCalledTimes(1);
+      expect(loginLocal).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

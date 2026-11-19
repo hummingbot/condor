@@ -93,15 +93,17 @@ export async function resolveUnauthorized(actions: {
 }): Promise<boolean> {
   let status: number;
   try {
-    status = (await fetch("/api/v1/auth/me", { headers: authHeaders() })).status;
+    status = await probe("/api/v1/auth/me", { headers: authHeaders() }, (res) => res.status);
   } catch {
-    // server not available, keep token
+    // server not available (or too slow to say), keep token
     return false;
   }
   if (status !== 401 && status !== 403) return false;
   try {
-    const res = await fetch("/api/v1/auth/mode");
-    if (res.ok && (await res.json())?.mode === "local") {
+    const mode = await probe("/api/v1/auth/mode", {}, async (res) =>
+      res.ok ? ((await res.json()) as { mode?: string } | null)?.mode : undefined,
+    );
+    if (mode === "local") {
       await actions.loginLocal();
       return true;
     }
@@ -110,6 +112,38 @@ export async function resolveUnauthorized(actions: {
   }
   actions.logout();
   return false;
+}
+
+/**
+ * How long one session probe may take before it counts as unanswered.
+ *
+ * Every request that 401s waits on this check (FD-01) after its own deadline
+ * was already cleared (FD-05), so a `/auth/me` that never answers would hang
+ * that request — and every later 401 joined to the same check — forever. An
+ * unanswered probe is treated like an unreachable server: the session is kept.
+ */
+export const AUTH_PROBE_TIMEOUT_MS = 10_000;
+
+/**
+ * One bounded auth request, body read included.
+ *
+ * Plain `fetch` on purpose, never `apiFetch`: these are the requests that
+ * decide what a 401 means, so they must not report a 401 back into the
+ * handler that is running them. (They are `/auth/` routes too, which
+ * `apiFetch` would not report anyway — this does not lean on that.)
+ */
+async function probe<T>(
+  path: string,
+  init: RequestInit,
+  read: (res: Response) => T | Promise<T>,
+): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AUTH_PROBE_TIMEOUT_MS);
+  try {
+    return await read(await fetch(path, { ...init, signal: controller.signal }));
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export const AuthContext = createContext<AuthState>({
