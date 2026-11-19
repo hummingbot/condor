@@ -76,15 +76,18 @@ export function Login() {
     probed.current = true;
 
     let cancelled = false;
+    let settled = false;
     fetch("/api/v1/auth/mode")
       .then((res) => (res.ok ? res.json() : { mode: "telegram" }))
       .then((data) => {
+        settled = true;
         if (cancelled) return;
         setMode(data?.mode ?? "telegram");
         if (data?.mode !== "local") return;
         return attemptLocalLogin();
       })
       .catch((err) => {
+        settled = true;
         // Nothing answered, so nothing here knows the mode — least of all this
         // catch. Guessing "telegram" printed "run /web in your bot" on machines
         // with no bot to run it in; say what actually happened instead.
@@ -95,6 +98,11 @@ export function Login() {
 
     return () => {
       cancelled = true;
+      // Torn down before the answer came back — StrictMode's mount/unmount/
+      // mount in dev does exactly this — so the probe never acted on it.
+      // Release the latch, or the remount returns early and the page sits on
+      // "Signing in..." forever with nothing in flight.
+      if (!settled) probed.current = false;
     };
   }, [searchParams, attemptLocalLogin, probeAttempt]);
 
