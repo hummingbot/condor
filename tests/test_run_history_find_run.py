@@ -142,3 +142,31 @@ def test_an_outage_is_not_reported_as_a_run_that_never_existed(history, monkeypa
     assert raised.value.status_code == 502
     assert "boom" not in raised.value.detail
     assert history == []
+
+
+def test_a_walk_that_fails_partway_is_an_outage_not_a_run_with_no_history(
+    monkeypatch,
+):
+    """FP-10: only ``missing`` is "no recorded history"; a failed walk is a 502."""
+
+    async def _fetch(client, name, **kwargs):
+        raise cp.RunHistoryUnavailable(
+            "Failed to read history for gan: refused by 10.0.0.5:8000"
+        )
+
+    monkeypatch.setattr(cp, "fetch_run_history", _fetch)
+    with pytest.raises(HTTPException) as raised:
+        _route(FakeClient(TWO_RUNS), monkeypatch, OLD)
+
+    assert raised.value.status_code == 502
+    assert "10.0.0.5" not in raised.value.detail
+
+
+def test_a_run_with_no_rows_still_answers_none(monkeypatch):
+    async def _fetch(client, name, **kwargs):
+        raise cp.RunHistoryUnavailable("No recorded history for gan", missing=True)
+
+    monkeypatch.setattr(cp, "fetch_run_history", _fetch)
+    out = _route(FakeClient(TWO_RUNS), monkeypatch, OLD)
+
+    assert out.source == "none"

@@ -734,10 +734,15 @@ async def get_run_history(
     except RunHistoryUnavailable as e:
         if e.missing:
             return RunHistoryResponse(source="none", detail=e.detail)
+        # A walk that failed partway is an outage, not a run with nothing
+        # recorded: answered as ``source: "none"`` the browser drew it as "no
+        # recorded history" with no way to ask again, and the detail carried
+        # the raw upstream exception — backend address included. A 502, as the
+        # run lookup above already answers, reads as a failed load (FP-10).
         logger.warning(
             "Run history for %s on '%s' failed: %s", bot_name, name, e.detail
         )
-        return RunHistoryResponse(source="none", detail=e.detail)
+        raise upstream_error("Failed to fetch run history", e)
 
     return RunHistoryResponse(
         controllers=history.controllers,

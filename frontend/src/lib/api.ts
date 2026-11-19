@@ -723,6 +723,9 @@ export interface PortfolioHistoryResponse {
   points: PortfolioHistoryPoint[];
   interval: string;
   top_tokens?: string[];
+  /** False when the server could not be read: `points` is then empty, not "no history". */
+  server_online?: boolean;
+  error_hint?: string | null;
 }
 
 export interface BotInfo {

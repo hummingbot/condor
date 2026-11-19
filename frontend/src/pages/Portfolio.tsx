@@ -87,7 +87,20 @@ type TileState = "ok" | "loading" | "error";
 function tileState(query: { data: unknown; isError: boolean; isPlaceholderData?: boolean }): TileState {
   if (query.isPlaceholderData) return query.isError ? "error" : "loading";
   if (query.data === undefined) return query.isError ? "error" : "loading";
+  // A route that reports an unreachable trading server in band (the bots page
+  // does) resolves with `server_online: false` and empty lists — a failure
+  // that `isError` never sees, and that would read as "0 bots".
+  if (isOffline(query.data)) return "error";
   return "ok";
+}
+
+/** The in-band "the trading server did not answer" of a 200 response. */
+function isOffline(data: unknown): boolean {
+  return (
+    typeof data === "object" &&
+    data !== null &&
+    (data as { server_online?: unknown }).server_online === false
+  );
 }
 
 /** The details line of a tile that has nothing to report. */
@@ -462,7 +475,7 @@ function PortfolioEvolution({ server, range, convertFromUsd, currencySymbol }: {
     });
   }, [server, queryClient]);
 
-  const { data, isLoading, isError, refetch } = useQuery({
+  const { data, isLoading, isError: historyFailed, refetch } = useQuery({
     queryKey: ["portfolio-history", server, range],
     queryFn: () => api.getPortfolioHistory(server, range),
     enabled: !!server,
@@ -470,8 +483,8 @@ function PortfolioEvolution({ server, range, convertFromUsd, currencySymbol }: {
   });
 
   const {
-    data: breakdownData,
-    isError: breakdownFailed,
+    data: breakdownAnswer,
+    isError: breakdownRejected,
     refetch: refetchBreakdown,
   } = useQuery({
     queryKey: ["portfolio-history-breakdown", server, range],
@@ -479,6 +492,12 @@ function PortfolioEvolution({ server, range, convertFromUsd, currencySymbol }: {
     enabled: !!server && wantStacked,
     refetchInterval: 60000,
   });
+  // The route reports an unreachable server in band (`server_online: false`
+  // with no points), which resolves the query: a failure `isError` alone
+  // never sees, and which would draw as an account with no history.
+  const isError = historyFailed || isOffline(data);
+  const breakdownFailed = breakdownRejected || isOffline(breakdownAnswer);
+  const breakdownData = isOffline(breakdownAnswer) ? undefined : breakdownAnswer;
   // Stacked only once there is a breakdown to stack. Before that the stacked
   // branch had no token series and the line branch was switched off, so the
   // box was simply blank — while loading, and for good if the request failed.

@@ -451,3 +451,33 @@ class _FakeWS:
         # The manager encodes each frame once per broadcast and fans out text
         # (PERF-210); decode here so assertions stay in terms of the payload.
         self.sent.append(json.loads(raw))
+
+
+# ── a failed read is not an empty history (FP-10) ──
+
+
+def test_an_unreachable_server_is_reported_rather_than_served_as_empty(env):
+    """No answer and no earlier one: ``server_online: false``, not ``points: []``
+    that the dashboard would draw as an account with no history."""
+    sds, client = env()
+
+    async def _boom(**kwargs):
+        raise ConnectionError("refused by 10.0.0.5:8000")
+
+    client.portfolio.get_history = _boom
+
+    resp = asyncio.run(get_portfolio_history(name="srv", range="1D", user=_USER))
+
+    assert resp.server_online is False
+    assert resp.points == []
+    assert resp.error_hint
+    assert "10.0.0.5" not in resp.error_hint
+
+
+def test_an_answered_history_is_online(env):
+    sds, client = env()
+
+    resp = asyncio.run(get_portfolio_history(name="srv", range="1D", user=_USER))
+
+    assert resp.server_online is True
+    assert resp.error_hint is None

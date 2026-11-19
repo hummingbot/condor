@@ -127,6 +127,25 @@ describe("Portfolio strip, when a tile's request fails", () => {
     expect(tile("Bots")).not.toContain("0 controllers");
   });
 
+  // The bots route answers an unreachable trading server in band — a 200 with
+  // `server_online: false` and empty lists — so the query resolves and only
+  // the flag says the server never answered.
+  it("does not report zero bots when the server answered offline", async () => {
+    calls.getBots.mockResolvedValue({
+      bots: [],
+      controllers: [],
+      total_pnl: 0,
+      total_volume: 0,
+      server_online: false,
+      error_hint: "Connection error",
+    });
+    await render();
+
+    expect(tile("Bots")).toContain("—");
+    expect(tile("Bots")).toContain("Could not load bots");
+    expect(tile("Bots")).not.toContain("0 controllers");
+  });
+
   it("says the period summary failed instead of loading for ever", async () => {
     calls.getExecutorsSummary.mockRejectedValue(new Error("down"));
     await render();
@@ -161,6 +180,31 @@ describe("Portfolio history chart", () => {
       await new Promise((r) => setTimeout(r, 0));
     });
     expect(calls.getPortfolioHistory.mock.calls.length).toBeGreaterThan(before);
+  });
+
+  it("says the load failed when the server answered offline, not that there is no history", async () => {
+    calls.getPortfolioHistory.mockResolvedValue({
+      ...history(),
+      server_online: false,
+      error_hint: "Unable to reach server",
+    });
+    await render();
+
+    const state = container.querySelector<HTMLElement>('[data-chart-state="error"]');
+    expect(state?.textContent).toContain("Could not load portfolio history");
+    expect(container.textContent).not.toContain("No history data available");
+
+    calls.getPortfolioHistory.mockResolvedValue(history(100, 110));
+    await act(async () => {
+      state!.querySelector("button")!.click();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    for (let i = 0; i < 4; i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+    }
+    expect(container.querySelector('[data-chart-state="error"]')).toBeNull();
   });
 
   it("still says there is no history when the request answers with none", async () => {
