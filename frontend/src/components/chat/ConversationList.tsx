@@ -418,15 +418,12 @@ export const ConversationList = memo(function ConversationList({
     );
   };
 
-  // Talked-to agents scroll in the column's body; the ones never talked to
-  // and the archive of removed agents sit at its foot, pinned above the Hub —
-  // they are where to *start*, not part of the history above them.
-  const talked = groups.filter(
-    (g) => (g.items.length > 0 || g.slug === CHAT_SLUG) && !isFootGroup(g.slug),
-  );
-  const quiet = groups.filter(
-    (g) => g.items.length === 0 && g.slug !== CHAT_SLUG && !isFootGroup(g.slug),
-  );
+  // One list of agents: the ones talked to first (they carry a count), the
+  // ones never talked to after them (they carry a `+`, the row's own "start").
+  // It was two sections — "Your chats" and "Start a chat with" — which put
+  // the same kind of row under two headings. Only the archive keeps its own
+  // place, pinned at the foot above the Hub.
+  const listed = groups.filter((g) => !isFootGroup(g.slug));
   const foot = groups.filter((g) => isFootGroup(g.slug));
 
   const renderGroup = (g: (typeof groups)[number]) => {
@@ -479,27 +476,16 @@ export const ConversationList = memo(function ConversationList({
             <Loader2 className="h-3 w-3 animate-spin" /> Loading…
           </div>
         )}
-        {talked.length > 0 && (
+        {listed.length > 0 && (
           <div className="px-4 pb-1.5 pt-2 text-xs font-medium text-[var(--color-text-muted)]">
             Your chats
           </div>
         )}
-        {talked.map((g) => renderGroup(g))}
+        {listed.map((g) => renderGroup(g))}
       </div>
 
-      {(quiet.length > 0 || foot.length > 0) && (
-        // Its own scroll past a third of the column, so a long list of unused
-        // agents never pushes the chats off screen.
-        <div className="flex max-h-[38%] shrink-0 flex-col gap-0.5 overflow-y-auto border-t border-[var(--color-border)] py-1">
-          {quiet.length > 0 && (
-            <div className="px-4 pb-1.5 pt-2 text-xs font-medium text-[var(--color-text-muted)]">
-              Start a chat with
-            </div>
-          )}
-          {quiet.map((g) => renderGroup(g))}
-          {foot.length > 0 && quiet.length > 0 && (
-            <div className="mx-4 my-1 border-t border-[var(--color-border)]" />
-          )}
+      {foot.length > 0 && (
+        <div className="flex shrink-0 flex-col gap-0.5 border-t border-[var(--color-border)] py-1">
           {foot.map((g) => renderGroup(g))}
         </div>
       )}
