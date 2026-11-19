@@ -19,9 +19,11 @@ interface GridConfigPanelProps {
   currentPrice: number | null;
   isSpot?: boolean;
   quoteCurrency?: string;
+  /** False until the user has typed into the form or tried to submit it. */
+  showErrors?: boolean;
 }
 
-export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false, quoteCurrency = "USDT" }: GridConfigPanelProps) {
+export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false, quoteCurrency = "USDT", showErrors = true }: GridConfigPanelProps) {
   const validation = useMemo(() => {
     const errors = gridConfigErrors(state);
     const warnings: string[] = [];
@@ -294,9 +296,9 @@ export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false,
       </div>
 
       {/* ── Validation ── */}
-      {(validation.errors.length > 0 || validation.warnings.length > 0) && (
+      {((showErrors && validation.errors.length > 0) || validation.warnings.length > 0) && (
         <div className="space-y-1">
-          {validation.errors.map((err, i) => (
+          {showErrors && validation.errors.map((err, i) => (
             <p key={i} className="flex items-center gap-1 text-[10px] text-[var(--color-red)]">
               <AlertTriangle className="h-3 w-3 shrink-0" />
               {err}

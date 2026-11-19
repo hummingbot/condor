@@ -14,6 +14,7 @@ import {
   Settings2,
   TrendingUp,
 } from "lucide-react";
+import { CHAT_BUBBLE_CLEARANCE } from "@/components/chat/bubbleClearance";
 
 import { NoServerCard } from "@/components/NoServerCard";
 import { useTradingRules } from "@/components/market/useTradingRules";
@@ -80,6 +81,17 @@ const TYPE_LABELS: Record<ExecutorType, string> = {
   order: "Order Executor",
   dca: "DCA Executor",
   lp: "LP Executor",
+};
+
+// What the submit button says. Plain verbs rather than "Create … Executor"
+// (UX review): shorter, so the button stays on one line beside the chat
+// bubble, and it names what happens rather than the machinery behind it.
+const ACTION_LABELS: Record<ExecutorType, string> = {
+  grid: "Start grid",
+  position: "Open position",
+  order: "Place order",
+  dca: "Start DCA",
+  lp: "Add liquidity",
 };
 
 // ── Page ──
@@ -155,9 +167,15 @@ export function CreateExecutor() {
   // there is nothing to come back to, and the alternative is a chart on a pair
   // the reset effect picked. A URL that names a pair *is* a choice, so it skips
   // the list — the effect above has not stripped the param yet on this render.
-  const [browserOpen, setBrowserOpen] = useState(
-    () => !searchParams.get("pair") && !hasRememberedMarket(),
-  );
+  //
+  // Reversed by the UX review: the list opening by itself over the chart read
+  // as a popup to dismiss, and a cold start now lands on a venue the account
+  // can trade on (see `coldStartRef`), so there is a sensible market to show.
+  // The list opens when the user asks for it.
+  const [browserOpen, setBrowserOpen] = useState(false);
+  // Captured on the first render, before the effect below writes the current
+  // market back to storage and makes every visit look like a returning one.
+  const coldStartRef = useRef(!searchParams.get("connector") && !hasRememberedMarket());
   const [rightPanelWidth, setRightPanelWidth] = useState(288);
   const [bottomPaneHeight, setBottomPaneHeight] = useState(200);
   // The selection belongs to the market it was made in, so it carries that
@@ -286,6 +304,19 @@ export function CreateExecutor() {
       gridDispatch({ type: "SET_CONNECTOR", value: allConnectors[0] });
     }
   }, [listsReady, allConnectors, connector]);
+
+  // A first visit should not open on a venue the account has no keys for (the
+  // form would sit behind "View only"). `allConnectors` lists credentialed
+  // venues first, so its head is a tradable one whenever any exists. Runs once:
+  // after that the user's own choice, view-only or not, is what is remembered.
+  useEffect(() => {
+    if (!listsReady || !coldStartRef.current) return;
+    coldStartRef.current = false;
+    const first = allConnectors[0];
+    if (first && credentialedConnectors?.has(first) && !credentialedConnectors.has(connector)) {
+      gridDispatch({ type: "SET_CONNECTOR", value: first });
+    }
+  }, [listsReady, allConnectors, credentialedConnectors, connector, gridDispatch]);
 
   // Executor types the venue does not support cannot stay selected (Grid on a CEX
   // → pick a DEX → land on Order).
@@ -417,6 +448,18 @@ export function CreateExecutor() {
       case "lp": return lpConfig.validation;
     }
   }, [executorType, gridConfig.validation, positionConfig.validation, orderConfig.validation, dcaConfig.validation, lpConfig.validation]);
+
+  // Errors wait until the user has typed into the form or pressed Create: a
+  // form that opens already red ("Amount required") reads as broken before
+  // anything has been entered. A new form type or market starts quiet again.
+  // Keyed by the form it was earned on, like `selection` above, so switching
+  // type or market drops it without an effect.
+  const formKey = `${executorType}:${connector}:${pair}`;
+  const [errorsFor, setErrorsFor] = useState<string | null>(null);
+  const showErrors = errorsFor === formKey;
+  const setShowErrors = (on: boolean) => setErrorsFor(on ? formKey : null);
+  const configScrollRef = useRef<HTMLDivElement>(null);
+  const shown = <V extends { errors: string[] }>(v: V): V => (showErrors ? v : { ...v, errors: [] });
 
   // What the form currently says, for the chat bubble (FEAT-060/FEAT-072).
   //
@@ -881,34 +924,43 @@ export function CreateExecutor() {
                   is untouched, and the panel keeps its scroll/footer split. */}
               <div className="relative flex min-h-0 flex-1 flex-col">
                 {/* Config Panel */}
-                <div className="flex-1 overflow-y-auto">
+                <div ref={configScrollRef} className="flex-1 overflow-y-auto" onInputCapture={() => setShowErrors(true)}>
                   {executorType === "grid" && (
-                    <GridConfigPanel state={gridState} dispatch={gridDispatch} currentPrice={currentPrice} isSpot={isSpot} quoteCurrency={pair?.split("-")[1] || "USDT"} />
+                    <GridConfigPanel state={gridState} dispatch={gridDispatch} currentPrice={currentPrice} isSpot={isSpot} quoteCurrency={pair?.split("-")[1] || "USDT"} showErrors={showErrors} />
                   )}
                   {executorType === "position" && (
-                    <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} validation={positionConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
+                    <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} validation={shown(positionConfig.validation)} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
                   )}
                   {executorType === "order" && (
-                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} strategies={caps.orderStrategies} baseAvailable={balances.base} quoteAvailable={balances.quote} />
+                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={shown(orderConfig.validation)} currentPrice={currentPrice} isSpot={isSpot} pair={pair} strategies={caps.orderStrategies} baseAvailable={balances.base} quoteAvailable={balances.quote} />
                   )}
                   {executorType === "dca" && (
-                    <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} validation={dcaConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
+                    <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} validation={shown(dcaConfig.validation)} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
                   )}
                   {executorType === "lp" && (
-                    <LPConfigPanel state={lpConfig.state} dispatch={lpConfig.dispatch} validation={lpConfig.validation} currentPrice={currentPrice} pair={pair} pool={lpConfig.pool} poolFetching={lpConfig.poolFetching} baseAvailable={balances.base} quoteAvailable={balances.quote} />
+                    <LPConfigPanel state={lpConfig.state} dispatch={lpConfig.dispatch} validation={shown(lpConfig.validation)} currentPrice={currentPrice} pair={pair} pool={lpConfig.pool} poolFetching={lpConfig.poolFetching} baseAvailable={balances.base} quoteAvailable={balances.quote} />
                   )}
                 </div>
 
                 {/* Sticky Create Footer */}
-                <div className="border-t border-[var(--color-border)] p-3">
-                  {!activeValidation.valid && (
-                    <p className="mb-2 text-[11px] text-[var(--color-red)]">
-                      {activeValidation.errors[0]}
-                    </p>
-                  )}
+                <div className={`border-t border-[var(--color-border)] p-3 ${CHAT_BUBBLE_CLEARANCE}`}>
                   <button
-                    onClick={() => createMutation.mutate()}
-                    disabled={!caps.canTrade || !activeValidation.valid || createMutation.isPending}
+                    onClick={() => {
+                      // Left enabled while invalid so a click can say why
+                      // instead of greying out with no reason given.
+                      if (!activeValidation.valid) {
+                        setShowErrors(true);
+                        // The messages sit at the foot of the form, which may be
+                        // scrolled out of view in a short panel.
+                        requestAnimationFrame(() => {
+                          const el = configScrollRef.current;
+                          el?.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+                        });
+                        return;
+                      }
+                      createMutation.mutate();
+                    }}
+                    disabled={!caps.canTrade || createMutation.isPending}
                     className="flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--color-primary-fill)] px-4 py-2.5 text-sm font-bold text-[var(--on-primary)] transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {createMutation.isPending ? (
@@ -916,7 +968,7 @@ export function CreateExecutor() {
                     ) : (
                       <Rocket className="h-4 w-4" />
                     )}
-                    Create {TYPE_LABELS[executorType]}
+                    {ACTION_LABELS[executorType]}
                   </button>
                 </div>
 

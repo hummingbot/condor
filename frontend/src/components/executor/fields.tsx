@@ -483,8 +483,10 @@ export function AmountField({
           value={localValue}
           onChange={handleChange}
           onBlur={() => setLocalValue(displayValue === 0 ? "" : String(Number(displayValue.toPrecision(8))))}
-          placeholder="0"
-          className="flex-1 rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-text)] placeholder:text-[var(--color-text-muted)]/40 focus:border-[var(--color-primary)] focus:outline-none"
+          // A faint "0" read as a disabled field holding a value (UX review);
+          // the amount is the one input every order needs, so it asks for it.
+          placeholder="Enter amount"
+          className="flex-1 rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-primary)] focus:outline-none"
         />
         <button
           onClick={toggleUnit}
@@ -530,7 +532,20 @@ export function LeverageField({
       </div>
     );
   }
-  return <NumberField label="Leverage" value={value} field={field} dispatch={dispatch} step={1} min={1} suffix="x" />;
+  // A rough guide, not the venue's number: with isolated margin the position is
+  // gone after a move of about 1/leverage (less once fees and maintenance margin
+  // count), which is the figure a first-time trader needs before going above 1x.
+  const liqMovePct = value > 1 ? 100 / value : null;
+  return (
+    <div className="min-w-0">
+      <NumberField label="Leverage" value={value} field={field} dispatch={dispatch} step={1} min={1} suffix="x" />
+      {liqMovePct !== null && (
+        <p className="mt-0.5 text-[10px] text-amber-400">
+          Liquidated after a ~{Number(liqMovePct.toPrecision(2))}% move against you
+        </p>
+      )}
+    </div>
+  );
 }
 
 // ── Shared constants ──
