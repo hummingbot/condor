@@ -117,11 +117,20 @@ export function ControllerPnlChart({ server, controllerId, botName, deployedAt, 
 
   // A request that failed is not a controller with no history. Only when there
   // is nothing to draw: a failed *refresh* keeps the series already on screen.
-  if (isError && data.length === 0) {
+  // Two ways to fail: the request rejects (Condor itself, a 4xx), or the route
+  // answers 200 with `server_online: false` because the trading server did not
+  // — which resolves the query, so `isError` alone read an outage as "no
+  // history".
+  const failed = isError || raw?.server_online === false;
+  if (failed && data.length === 0) {
     return (
       <ChartState
         kind="error"
-        message="Could not load this controller's performance history"
+        message={
+          raw?.server_online === false && raw.error_hint
+            ? `Could not load this controller's performance history — ${raw.error_hint}`
+            : "Could not load this controller's performance history"
+        }
         onRetry={() => void refetch()}
         height={height}
         className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]"

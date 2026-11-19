@@ -74,7 +74,14 @@ function series(end: number, n: number): ControllerPerformanceSnapshot[] {
 }
 
 /** Serve a scripted list of history pages and record every URL requested. */
-function serve(bodies: { snapshots: ControllerPerformanceSnapshot[]; next_cursor?: string | null }[]) {
+function serve(
+  bodies: {
+    snapshots: ControllerPerformanceSnapshot[];
+    next_cursor?: string | null;
+    server_online?: boolean;
+    error_hint?: string;
+  }[],
+) {
   const urls: string[] = [];
   vi.stubGlobal(
     "fetch",
@@ -310,5 +317,38 @@ describe("ControllerPnlChart when the history request fails", () => {
       });
     }
     expect(state()?.dataset.chartState).toBe("empty");
+  });
+
+  // The route reports an unreachable trading server in band — a 200 carrying
+  // `server_online: false` and no rows — so the query *resolves*. Reading only
+  // `isError` drew that outage as "No performance history available", with no
+  // way to ask again.
+  it("says the load failed when the server answered offline, and Retry asks again", async () => {
+    const urls = serve([
+      { snapshots: [], server_online: false, error_hint: "Connection error: unreachable" },
+      { snapshots: series(NOW, 3) },
+    ]);
+    await mount(new Date(NOW - 60 * MINUTE).toISOString());
+    for (let i = 0; i < 5 && state()?.dataset.chartState !== "error"; i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+    }
+
+    expect(state()?.dataset.chartState).toBe("error");
+    expect(container.textContent).toContain("Could not load this controller's performance history");
+    expect(container.textContent).toContain("Connection error: unreachable");
+    expect(container.textContent).not.toContain("No performance history available");
+
+    await act(async () => {
+      container.querySelector("button")!.click();
+    });
+    for (let i = 0; i < 5 && !container.querySelector("[data-chart]"); i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+    }
+    expect(urls).toHaveLength(2);
+    expect(container.querySelector("[data-chart]")).not.toBeNull();
   });
 });
