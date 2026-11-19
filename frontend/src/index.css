@@ -45,6 +45,16 @@
 }
 
 /* ── Dark Mode: Hummingbot DS (ink + Condor Gold) ── */
+:root {
+  /* Condor Gold, toned down for fills (solid buttons, the chat bubble). The
+     DS's #FCC603 at full saturation read as too loud across a whole screen;
+     this keeps the hue and drops the glare. Ink on it stays ~10:1. */
+  --condor-gold-soft: hsl(44 78% 55%);
+  /* A touch lighter again for the chat's own gold — the user's bubble, send,
+     the new-chat glyph and the chat button — where it sits in long runs. */
+  --chat-gold: hsl(44 80% 61%);
+}
+
 :root,
 [data-theme="dark"] {
   --color-bg: hsl(var(--background));
@@ -108,6 +118,11 @@
      gold is 2.22:1 here and 3.26:1 in light — both under the 4.5:1 floor,
      which is why neither theme may spell it `text-white`. */
   --chat-inset: var(--ink-900);
+  /* The reader's own message: a quiet grey, not gold. Gold in long runs of
+     the transcript read as loud; the bubble only has to say "you", which its
+     right-hand placement already does. */
+  --chat-user-bubble: var(--ink-850);
+  --on-chat-user-bubble: hsl(var(--foreground));
   --chat-rule: hsl(var(--border));
   --on-primary: hsl(var(--primary-foreground));
 
@@ -118,9 +133,12 @@
      here, deep gold in light. */
   /* Gold as a *fill* — a solid button, the current nav item, an active pill's
      wash. Here it is the primary itself; light splits the two (see there). */
-  --color-primary-fill: var(--color-primary);
-  --color-nav-active: var(--color-primary-fill);
-  --on-nav-active: var(--on-primary);
+  --color-primary-fill: var(--condor-gold-soft);
+  /* The current page is a gold *wash* with gold text, not a solid gold slab:
+     feedback on the refresh was that a block of #FCC603 in the nav shouted
+     over everything else on the screen. */
+  --color-nav-active: color-mix(in srgb, var(--color-primary) 16%, transparent);
+  --on-nav-active: var(--color-primary);
 
   color-scheme: dark;
 }
@@ -170,6 +188,8 @@
      READ-293 came from: the fence used to reuse `--color-bg` and so sat
      lighter than the container it was nested in. */
   --chat-inset: var(--ink-100);
+  --chat-user-bubble: var(--ink-150);
+  --on-chat-user-bubble: var(--ink-950);
   --chat-rule: hsl(var(--border));
   --on-primary: hsl(var(--primary-foreground));
 
@@ -179,8 +199,10 @@
      read (`--color-primary`, ~3.3:1); as a fill it can be Condor's own bright
      gold, with ink on it (~12:1). One deep gold for both made every gold
      moment in light read as mustard next to the dark theme's. */
-  --color-primary-fill: var(--condor-gold);
-  --color-nav-active: var(--color-primary-fill);
+  --color-primary-fill: var(--condor-gold-soft);
+  /* Wash, not slab — see the dark block. Ink text: deep gold on a gold wash
+     would sit near 3:1. */
+  --color-nav-active: color-mix(in srgb, var(--condor-gold) 22%, transparent);
   --on-nav-active: var(--ink-950);
 
   color-scheme: light;
@@ -196,6 +218,7 @@
 :root[data-colorblind],
 [data-theme="dark"][data-colorblind] {
   --color-primary-fill: var(--color-primary);
+  --chat-gold: var(--color-primary-fill);
   --color-accent: #56b4e9;
   --color-primary: #56b4e9;
   --color-primary-hover: #7ec8f0;
@@ -210,6 +233,7 @@
 
 [data-theme="light"][data-colorblind] {
   --color-primary-fill: var(--color-primary);
+  --chat-gold: var(--color-primary-fill);
   --color-accent: #0072b2;
   --color-primary: #0072b2;
   --color-primary-hover: #005a8c;

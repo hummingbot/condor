@@ -253,7 +253,7 @@ export const ChatRail = memo(function ChatRail({
           // action in the column reads as a button, not as a row of the list.
           className="flex w-full items-center gap-2.5 rounded-lg bg-[var(--color-surface)] px-2 py-2 text-left text-sm font-medium text-[var(--color-text)] shadow-sm ring-1 ring-[var(--color-border)] transition-shadow hover:shadow-md"
         >
-          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--color-primary-fill)] text-[var(--on-primary)]">
+          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--chat-gold)] text-[var(--on-primary)]">
             <Plus className="h-3.5 w-3.5" />
           </span>
           New chat
