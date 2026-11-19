@@ -72,7 +72,7 @@ export function describePage(pathname: string, search = ""): PageContext {
     case "bots":
       return second
         ? of(`Bot detail ("${second}")`, "Bots & controllers")
-        : of(withTab("Activity"), "Bots & controllers");
+        : of(withTab("Bots"), "Bots & controllers");
     case "trade":
       return of(withTab("Trade"), "Trading & executors");
     // Mirrors the `/dex` and `/dex/:network/:address` entries `lib/pageFacts.ts`

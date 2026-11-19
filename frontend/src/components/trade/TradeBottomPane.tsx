@@ -474,7 +474,7 @@ export function TradeBottomPane({
               Positions ({positions.length})
               {isLoadingPositions && <Loader2 className="ml-1 inline h-3 w-3 animate-spin" />}
             </button>
-            {/* This pane is the slice for one market or pool; Activity is where
+            {/* This pane is the slice for one market or pool; Bots is where
                 every executor and position lives, with history and PnL — so the
                 door to it sits beside the tabs that show the slice. */}
             <Link
@@ -482,7 +482,7 @@ export function TradeBottomPane({
               className="flex shrink-0 items-center gap-1 border-l border-[var(--color-border)] px-3 text-[11px] font-medium text-[var(--color-primary)] transition-colors hover:bg-[var(--color-surface-hover)]"
               title="Every executor and position, with history and PnL"
             >
-              All in Activity
+              All in Bots
               <ArrowRight className="h-3 w-3" />
             </Link>
           </div>

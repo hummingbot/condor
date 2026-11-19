@@ -310,7 +310,7 @@ export function DockExecution({
       onClick={() => navigate("/bots")}
       className="flex w-full items-center gap-1 px-3 py-1.5 text-left text-[11px] text-[var(--color-primary)] transition-colors hover:bg-[var(--color-surface-hover)]"
     >
-      Open in Activity
+      Open in Bots
       <ArrowRight className="h-3 w-3" />
     </button>
   );
