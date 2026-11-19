@@ -75,11 +75,12 @@ describe("an agent's turn", () => {
 });
 
 describe("the user's turn", () => {
-  it("keeps the bubble but never writes white on the gold", () => {
+  it("keeps the bubble, in its own quiet grey with the text that goes on it", () => {
     render(message({ role: "user", text: "how thin?" }));
 
-    const bubble = container.querySelector<HTMLElement>("[class*='--color-primary']");
-    expect(bubble?.className).toContain("text-[var(--on-primary)]");
+    const bubble = container.querySelector<HTMLElement>("[class*='--chat-user-bubble']");
+    expect(bubble?.className).toContain("text-[var(--on-chat-user-bubble)]");
+    expect(container.innerHTML).not.toContain("--color-primary-fill");
     expect(container.innerHTML).not.toContain("text-white");
   });
 });

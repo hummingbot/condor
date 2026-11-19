@@ -53,7 +53,7 @@ export const PANELS: {
   },
   {
     id: "execution",
-    label: "Activity",
+    label: "Bots",
     Icon: Cpu,
     hint: "Every controller deployed — what it has done, and pause or start it",
     disabledHint: "Select a server to see what is deployed",

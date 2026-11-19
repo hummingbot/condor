@@ -5,7 +5,7 @@ import { Link } from "react-router-dom";
  * The foot of a rail panel: the door to the full page it previews.
  *
  * The rail's panels are glances at something that has its own home — Portfolio,
- * Activity, Routines, every loop — and each says where that home is, in the
+ * Bots, Routines, every loop — and each says where that home is, in the
  * same words and the same place, so a reader who wants more than the glance
  * never has to know the page exists to find it.
  */

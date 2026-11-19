@@ -253,7 +253,7 @@ export const ChatRail = memo(function ChatRail({
           // action in the column reads as a button, not as a row of the list.
           className="flex w-full items-center gap-2.5 rounded-lg bg-[var(--color-surface)] px-2 py-2 text-left text-sm font-medium text-[var(--color-text)] shadow-sm ring-1 ring-[var(--color-border)] transition-shadow hover:shadow-md"
         >
-          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--color-primary-fill)] text-[var(--on-primary)]">
+          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--chat-gold)] text-[var(--on-primary)]">
             <Plus className="h-3.5 w-3.5" />
           </span>
           New chat
@@ -304,6 +304,7 @@ export const ChatRail = memo(function ChatRail({
               }
               expanded={count > 0 ? expanded : undefined}
               count={count}
+              startable={!!agent && count === 0}
               attention={attention}
               live={live}
               isNew={agent?.is_new}
@@ -547,6 +548,7 @@ function RailRow({
   icon,
   expanded,
   count,
+  startable,
   attention,
   live,
   isNew,
@@ -565,6 +567,8 @@ function RailRow({
   expanded?: boolean;
   /** How many chats it holds, shown folded. */
   count?: number;
+  /** No chats yet: a `+` stands where the count would, since a click starts one. */
+  startable?: boolean;
   /** A folded chat waits on an approval, or is answering. */
   attention?: "waiting" | "busy";
   live?: boolean;
@@ -637,6 +641,12 @@ function RailRow({
           >
             {count}
           </span>
+        )}
+        {startable && (
+          <Plus
+            className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]"
+            aria-hidden
+          />
         )}
         {expanded !== undefined && (
           <ChevronDown

@@ -135,10 +135,10 @@ function AppShellBody() {
                     // an agent's own workspace are claimed for Agents by hand:
                     // they are Agents' pages, and a nav with nothing lit there
                     // left the reader with no idea where they were.
-                    // Solid gold with ink for the current page, muted for the
-                    // rest — Botcamp's sidebar (Hummingbot design system).
+                    // A gold wash for the current page, muted for the rest. Was
+                    // solid gold (Botcamp's sidebar); read as too loud.
                     isActive || (to === "/" && inAgentsSection)
-                      ? "bg-[var(--color-nav-active)] text-[var(--on-nav-active)] shadow-sm"
+                      ? "bg-[var(--color-nav-active)] text-[var(--on-nav-active)]"
                       : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
                   }`
                 }

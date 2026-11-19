@@ -354,6 +354,6 @@ describe("the execution panel", () => {
     await render();
 
     expect(text()).toContain(`No controllers deployed on ${SERVER}`);
-    expect(text()).toContain("Open in Activity");
+    expect(text()).toContain("Open in Bots");
   });
 });

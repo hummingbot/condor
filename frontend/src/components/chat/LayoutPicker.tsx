@@ -23,7 +23,7 @@ export type { LayoutChoice, MainSlot, SideSlot, SlotId };
 const MAIN: { id: MainSlot; label: string; Icon: LucideIcon; hint: string }[] = [
   { id: "agent", label: "Agent", Icon: Bot, hint: "What the agent knows and runs" },
   { id: "portfolio", label: "Portfolio", Icon: Wallet, hint: "Balances by asset and venue" },
-  { id: "execution", label: "Activity", Icon: Cpu, hint: "What is running: deployed controllers" },
+  { id: "execution", label: "Bots", Icon: Cpu, hint: "What is running: deployed controllers" },
   { id: "loops", label: "Loops", Icon: Repeat, hint: "Live tick loops" },
 ];
 const SIDE: { id: SideSlot; label: string; Icon: LucideIcon; hint: string }[] = [
