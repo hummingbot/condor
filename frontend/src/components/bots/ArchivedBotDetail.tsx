@@ -362,7 +362,7 @@ function ControllerTable({
                   key={c.controller_id || "__none__"}
                   className={`border-b border-[var(--color-border)]/50 hover:bg-[var(--color-surface-hover)] ${
                     charted === c.controller_id && !unattributed
-                      ? "bg-[var(--color-primary)]/10"
+                      ? "bg-[var(--color-primary-fill)]/10"
                       : ""
                   }`}
                 >
@@ -483,7 +483,7 @@ function ArchivedReportPanel({
             </p>
             <button
               onClick={chart}
-              className="flex items-center gap-2 rounded px-3 py-1.5 text-xs bg-[var(--color-primary)]/20 text-[var(--color-primary)] border border-[var(--color-primary)]/40 hover:bg-[var(--color-primary)]/30"
+              className="flex items-center gap-2 rounded px-3 py-1.5 text-xs bg-[var(--color-primary-fill)]/20 text-[var(--color-primary)] border border-[var(--color-primary)]/40 hover:bg-[var(--color-primary-fill)]/30"
             >
               <BarChart3 className="h-3.5 w-3.5" /> Chart
             </button>

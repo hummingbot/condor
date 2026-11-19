@@ -1,0 +1,126 @@
+/* ============================================================================
+   HUMMINGBOT FOUNDATION DESIGN SYSTEM — ported for Condor
+   Source: github.com/hummingbot/design-system @ f8a6c04, src/styles/tokens.css
+
+   Ported, not imported, for two reasons:
+   1. The package targets Tailwind v3. Its `--radius-sm/md/lg/xl` and
+      `--shadow-xs/sm/md/lg` share names with Tailwind v4's own theme
+      variables, so importing them verbatim would silently re-size every
+      `rounded-*` and `shadow-*` in the app. They are omitted here; Tailwind
+      v4's defaults already match the DS preset (sm 4px, md 6px, lg 8px).
+   2. The DS switches themes on a `.dark` class; Condor switches on
+      `[data-theme]` (dark | light). The semantic blocks below
+      are the DS light/dark values placed under Condor's selectors.
+
+   Keep the values in sync with the upstream file; change Condor-specific
+   choices in index.css, never here.
+   ========================================================================== */
+
+:root {
+  /* --- Brand palette (identical on every property) --- */
+  --hb-teal: #5FFFD7;
+  --hb-yellow: #FCDB17;
+  --hb-magenta: #E549FF;
+  --hb-orange: #EF8728;
+  --hb-cyan: #00C2CE;
+  --hb-cyan-dark: #00B1BB;
+
+  --condor-gold: #FCC603;
+  --condor-gold-deep: #B8860B;
+  --condor-orange: #ED6C24;
+  --condor-ink: #111111;
+
+  /* --- Neutrals (ink scale) --- */
+  --ink-0: #ffffff;
+  --ink-50: #fafafa;
+  --ink-100: #f5f5f5;
+  --ink-150: #ededee;
+  --ink-200: #e5e7eb;
+  --ink-300: #d4d4d8;
+  --ink-400: #a1a1aa;
+  --ink-500: #71717a;
+  --ink-600: #52525b;
+  --ink-700: #3f3f46;
+  --ink-800: #2f2f2f;
+  --ink-850: #1f1f22;
+  --ink-900: #1a1a1b;
+  --ink-950: #0f0f0f;
+  --ink-999: #090909;
+
+  /* --- Trading semantics --- */
+  --bull: #22c55e;
+  --bull-muted: #4CAF50;
+  --bear: #ef4444;
+  --bear-muted: #F44336;
+
+  --shadow-glow-gold: 0 0 24px rgba(252, 198, 3, .35);
+}
+
+/* =========== Semantic theme (dark) — DS `.dark` =========== */
+:root,
+[data-theme="dark"] {
+  --background: 0 0% 7%;
+  --foreground: 0 0% 96%;
+  --card: 0 0% 4%;
+  --card-foreground: 0 0% 96%;
+  --popover: 0 0% 4%;
+  --popover-foreground: 0 0% 96%;
+  --primary: 46 98% 50%;
+  --primary-foreground: 0 0% 9%;
+  --secondary: 38 92% 50%;
+  --secondary-foreground: 0 0% 9%;
+  --muted: 0 0% 15%;
+  --muted-foreground: 0 0% 65%;
+  --accent: 289 100% 64%;
+  --accent-foreground: 0 0% 100%;
+  --destructive: 0 84% 60%;
+  --destructive-foreground: 0 0% 96%;
+  --border: 0 0% 18%;
+  --input: 0 0% 18%;
+  --ring: 46 98% 50%;
+
+  --success: 142 71% 45%;
+  --error: 0 84% 60%;
+  --warning: 38 92% 50%;
+}
+
+/* =========== Semantic theme (light) — DS `:root` =========== */
+[data-theme="light"] {
+  --background: 0 0% 98%;
+  --foreground: 0 0% 9%;
+  --card: 0 0% 100%;
+  --card-foreground: 0 0% 9%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 0 0% 9%;
+  --primary: 43 91% 38%;
+  /* DS says white here; white on this gold is ~3.3:1, under the 4.5:1 floor.
+     Condor keeps ink on gold — see --on-primary in index.css. */
+  --primary-foreground: 0 0% 9%;
+  --secondary: 38 92% 41%;
+  --secondary-foreground: 0 0% 100%;
+  --muted: 40 20% 96%;
+  --muted-foreground: 0 0% 40%;
+  --accent: 289 100% 55%;
+  --accent-foreground: 0 0% 100%;
+  --destructive: 0 84% 55%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 40 10% 88%;
+  --input: 40 10% 88%;
+  --ring: 43 91% 38%;
+
+  --success: 142 71% 40%;
+  --error: 0 84% 55%;
+  --warning: 38 92% 45%;
+}
+
+/* Eyebrow: small mono uppercase kicker above headings — the signature
+   pattern across Foundation properties (DS constants/typography.ts). */
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--color-primary);
+}

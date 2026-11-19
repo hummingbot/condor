@@ -592,7 +592,7 @@ export function ChatInput({
                 isRecording ||
                 isTranscribing
               }
-              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[var(--color-primary)] text-[var(--on-primary)] transition-opacity hover:opacity-90 disabled:opacity-40"
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[var(--color-primary-fill)] text-[var(--on-primary)] transition-opacity hover:opacity-90 disabled:opacity-40"
               title={
                 isStreaming
                   ? "Send — interrupts the current answer"

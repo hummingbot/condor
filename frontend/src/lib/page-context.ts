@@ -9,7 +9,7 @@
  */
 
 import { queryClient } from "@/lib/queryClient";
-import { DISPLAY_CURRENCY_KEY, THEME_KEY } from "@/lib/sessionState";
+import { COLORBLIND_KEY, DISPLAY_CURRENCY_KEY, THEME_KEY } from "@/lib/sessionState";
 import { socketStatus } from "@/lib/shared-socket";
 
 /**
@@ -72,7 +72,7 @@ export function describePage(pathname: string, search = ""): PageContext {
     case "bots":
       return second
         ? of(`Bot detail ("${second}")`, "Bots & controllers")
-        : of(withTab("Bots"), "Bots & controllers");
+        : of(withTab("Activity"), "Bots & controllers");
     case "trade":
       return of(withTab("Trade"), "Trading & executors");
     // Mirrors the `/dex` and `/dex/:network/:address` entries `lib/pageFacts.ts`
@@ -123,8 +123,9 @@ export function failingRequests(limit = 5): string[] {
 /** Preferences that change what the page renders — and so what "wrong" means. */
 export function displayPrefs(): string {
   const theme = localStorage.getItem(THEME_KEY) ?? "system";
+  const colorblind = localStorage.getItem(COLORBLIND_KEY) === "1" ? " + colour-blind" : "";
   const currency = localStorage.getItem(DISPLAY_CURRENCY_KEY) ?? "USDT";
-  return `theme ${theme} · currency ${currency}`;
+  return `theme ${theme}${colorblind} · currency ${currency}`;
 }
 
 /** Live-data health. A stale dashboard is usually a closed socket. */

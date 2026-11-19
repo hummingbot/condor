@@ -68,7 +68,12 @@ export function usePaneGuard({
   panelSlug: string;
   apply: (next: PaneView) => void;
 }): {
-  openPane: (next: PaneView) => void;
+  /**
+   * `then` runs once the change is made — at once, or after Discard — and
+   * never on Cancel, so a caller changing more than the pane (the layout) can
+   * hold the rest of its change until the guard has said yes.
+   */
+  openPane: (next: PaneView, then?: () => void) => void;
   onPanelDirtyChange: (dirty: boolean) => void;
   dialog: ReactNode;
 } {
@@ -76,15 +81,34 @@ export function usePaneGuard({
   // Boxed, so a pending `null` (close the pane) is told apart from no request.
   // `go` is a browser traversal that was undone: the delta to replay.
   const [pending, setPending] = useState<
-    { next: PaneView } | { go: number } | null
+    { next: PaneView; then?: () => void } | { go: number } | null
   >(null);
 
-  const guarded = (next: PaneView) => {
-    if (panelDirty && paneHandoffDropsPanel(pane, next, panelSlug)) {
-      setPending({ next });
+  // True while an accepted request's `then` runs: the pane moves it makes are
+  // part of the change the reader already said yes to, and this render's
+  // `pane` and `panelDirty` are still the ones from before the answer.
+  const accepted = useRef(false);
+  const runAccepted = (then?: () => void) => {
+    if (!then) return;
+    accepted.current = true;
+    try {
+      then();
+    } finally {
+      accepted.current = false;
+    }
+  };
+
+  const guarded = (next: PaneView, then?: () => void) => {
+    if (
+      !accepted.current &&
+      panelDirty &&
+      paneHandoffDropsPanel(pane, next, panelSlug)
+    ) {
+      setPending({ next, then });
       return;
     }
     apply(next);
+    runAccepted(then);
   };
   // Handed out under one identity for the life of the host (PERF-393). `pane`
   // is a fresh object on every host render and `apply` a fresh closure, so an
@@ -96,7 +120,10 @@ export function usePaneGuard({
   useEffect(() => {
     latest.current = guarded;
   });
-  const openPane = useCallback((next: PaneView) => latest.current(next), []);
+  const openPane = useCallback(
+    (next: PaneView, then?: () => void) => latest.current(next, then),
+    [],
+  );
 
   // What the popstate listener compares against: the pane on screen and the
   // entry it was committed on. Refreshed after every commit, so at the moment
@@ -170,6 +197,7 @@ export function usePaneGuard({
           window.history.go(request.go);
         } else {
           apply(request.next);
+          runAccepted(request.then);
         }
       }}
       onClose={() => setPending(null)}

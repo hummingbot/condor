@@ -87,7 +87,7 @@ export function ServerSelector() {
             }}
             className={`flex w-full items-center gap-2.5 px-3 py-2 text-sm transition-colors hover:bg-[var(--color-surface-hover)] ${
               s.name === server
-                ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+                ? "bg-[var(--color-primary-fill)]/10 text-[var(--color-primary)]"
                 : ""
             }`}
           >

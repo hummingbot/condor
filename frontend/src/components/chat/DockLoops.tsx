@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 
+import { DockOpenLink } from "@/components/chat/DockOpenLink";
 import { LoopCardGrid } from "@/components/chat/LoopsPanel";
 import { loopsOnServer, useLiveLoops } from "@/hooks/useLiveLoops";
 import { agentsQuery } from "@/lib/queryClient";
@@ -46,14 +47,18 @@ export function DockLoops({
   );
 
   return (
-    <div className="flex flex-col gap-3 p-3">
-      <LoopCardGrid
-        loops={scoped}
-        isLoading={isLoading}
-        agents={agents}
-        onOpenLoop={onOpenLoop}
-        emptyLabel={`Nothing looping on ${server}`}
-      />
+    <div className="flex flex-col">
+      <div className="flex flex-col gap-3 p-3">
+        <LoopCardGrid
+          loops={scoped}
+          isLoading={isLoading}
+          agents={agents}
+          onOpenLoop={onOpenLoop}
+          emptyLabel={`Nothing looping on ${server}`}
+        />
+      </div>
+      {/* Every loop, on every server — the global view this section narrows. */}
+      <DockOpenLink to="/?panel=loops" label="Open all loops" />
     </div>
   );
 }

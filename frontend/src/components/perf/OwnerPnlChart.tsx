@@ -824,7 +824,7 @@ function Toggle<T extends string>({
           onClick={() => onPick(option.value)}
           className={`rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
             option.value === active
-              ? "bg-[var(--color-primary)] text-[var(--on-primary)]"
+              ? "bg-[var(--color-primary-fill)] text-[var(--on-primary)]"
               : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
           }`}
         >

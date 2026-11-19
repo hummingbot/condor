@@ -100,7 +100,7 @@ export function PersonDetail({
                   aria-pressed={currentState === target}
                   className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors disabled:cursor-default ${
                     currentState === target
-                      ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                      ? "bg-[var(--color-primary-fill)]/15 text-[var(--color-primary)]"
                       : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] disabled:opacity-40"
                   }`}
                 >

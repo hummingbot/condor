@@ -444,7 +444,7 @@ export const AgentKnowledge = memo(function AgentKnowledge({
             title={name}
             className={`flex min-w-fit flex-1 shrink-0 basis-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md border px-2 py-1.5 transition-colors ${
               active
-                ? "border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+                ? "border-[var(--color-primary)]/40 bg-[var(--color-primary-fill)]/10 text-[var(--color-primary)]"
                 : "border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text-muted)] hover:border-[var(--color-primary)]/40 hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
             }`}
           >
@@ -884,7 +884,7 @@ function ProposedSkill({
         <button
           onClick={() => accept.mutate()}
           disabled={busy}
-          className="flex items-center gap-1 rounded border border-[var(--color-primary)]/50 px-2 py-1 text-[11px] text-[var(--color-primary)] transition-colors hover:bg-[var(--color-primary)]/10 disabled:opacity-50"
+          className="flex items-center gap-1 rounded border border-[var(--color-primary)]/50 px-2 py-1 text-[11px] text-[var(--color-primary)] transition-colors hover:bg-[var(--color-primary-fill)]/10 disabled:opacity-50"
         >
           {accept.isPending ? (
             <Loader2 className="h-3 w-3 animate-spin" />

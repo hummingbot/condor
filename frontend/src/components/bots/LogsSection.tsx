@@ -48,7 +48,7 @@ export function LogsSection({ logs }: { logs: BotLogEntry[] }) {
                 filter === f
                   ? f === "error"
                     ? "bg-[var(--color-red)]/15 text-[var(--color-red)]"
-                    : "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                    : "bg-[var(--color-primary-fill)]/15 text-[var(--color-primary)]"
                   : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
               }`}
             >

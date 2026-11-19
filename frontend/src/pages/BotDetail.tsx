@@ -140,7 +140,7 @@ export function BotDetail() {
                 onClick={handleToggleEdit}
                 className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs transition-colors ${
                   editing
-                    ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+                    ? "bg-[var(--color-primary-fill)]/10 text-[var(--color-primary)]"
                     : "text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
                 }`}
               >
@@ -170,7 +170,7 @@ export function BotDetail() {
                 <button
                   onClick={handleSave}
                   disabled={!canSave || saveMutation.isPending}
-                  className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-opacity disabled:opacity-40"
+                  className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary-fill)] px-3 py-1.5 text-xs font-medium text-[var(--on-primary)] transition-opacity disabled:opacity-40"
                 >
                   {saveMutation.isPending ? (
                     <Loader2 className="h-3 w-3 animate-spin" />

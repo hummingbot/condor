@@ -1112,6 +1112,13 @@ async def _handle_destroy_session(ws: WebSocket, user_id: int, msg: dict) -> Non
     # under this key starts with a fresh one.
     _slot_gates.pop(task_key, None)
 
+    # A web slot *is* its conversation. Closed without a word said, it was
+    # never a conversation: drop it rather than leave an empty row behind.
+    try:
+        conversations.discard_if_empty(user_id, slot_id)
+    except Exception:  # noqa: BLE001 - closing a tab must not fail on cleanup
+        log.warning("Could not discard empty conversation %s", slot_id, exc_info=True)
+
     await _send(
         ws, {"event": "session_destroyed", "slot_id": slot_id, "had_session": destroyed}
     )

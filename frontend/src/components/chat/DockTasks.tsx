@@ -96,7 +96,7 @@ export function DockTasks({
             title={s.hint}
             className={`rounded px-1.5 py-0.5 text-[10px] transition-colors ${
               scope === s.id
-                ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                ? "bg-[var(--color-primary-fill)]/15 text-[var(--color-primary)]"
                 : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
             }`}
           >

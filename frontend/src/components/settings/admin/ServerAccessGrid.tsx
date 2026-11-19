@@ -96,7 +96,7 @@ export function ServerAccessGrid({
                       aria-pressed={active}
                       className={`rounded px-2 py-1 text-[11px] font-medium transition-colors disabled:cursor-default ${
                         active
-                          ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                          ? "bg-[var(--color-primary-fill)]/15 text-[var(--color-primary)]"
                           : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] disabled:opacity-40 disabled:hover:bg-transparent"
                       }`}
                     >

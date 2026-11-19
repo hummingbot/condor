@@ -136,7 +136,7 @@ export function AgentStrategies({
             <button
               onClick={() => createDefaultLoop.mutate()}
               disabled={createDefaultLoop.isPending}
-              className="flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+              className="flex items-center gap-2 rounded-lg bg-[var(--color-primary-fill)] px-4 py-2 text-sm font-medium text-[var(--on-primary)] disabled:opacity-50"
             >
               <CircleDot className="h-4 w-4" />
               {createDefaultLoop.isPending ? "Creating…" : "Use default loop"}
@@ -160,7 +160,7 @@ export function AgentStrategies({
           <div className="flex items-center justify-end">
             <button
               onClick={() => setShowCreate(true)}
-              className="flex items-center gap-1.5 rounded-lg bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-all hover:shadow-lg hover:shadow-[var(--color-primary)]/20"
+              className="flex items-center gap-1.5 rounded-lg bg-[var(--color-primary-fill)] px-3 py-1.5 text-xs font-medium text-[var(--on-primary)] transition-all hover:shadow-lg hover:shadow-[var(--color-primary)]/20"
             >
               <Plus className="h-3.5 w-3.5" />
               New Loop
@@ -314,7 +314,7 @@ function CreateStrategyDialog({
           <button
             onClick={() => createMutation.mutate()}
             disabled={!name.trim() || createMutation.isPending}
-            className="rounded-lg bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-white transition-opacity disabled:opacity-40"
+            className="rounded-lg bg-[var(--color-primary-fill)] px-4 py-2 text-sm font-medium text-[var(--on-primary)] transition-opacity disabled:opacity-40"
           >
             {createMutation.isPending ? "Creating..." : "Create Loop"}
           </button>

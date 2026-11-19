@@ -22,7 +22,7 @@ export function ViewOnlyOverlay({ connector }: { connector: string }) {
       <div className="absolute inset-0 bg-[var(--color-bg)]/60 backdrop-blur-sm" />
 
       <div className="relative z-10 mx-4 flex flex-col items-center rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5 text-center shadow-xl shadow-black/20">
-        <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-xl bg-[var(--color-primary)]/10 ring-1 ring-[var(--color-primary)]/20">
+        <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-xl bg-[var(--color-primary-fill)]/10 ring-1 ring-[var(--color-primary)]/20">
           <KeyRound className="h-5 w-5 text-[var(--color-primary)]" />
         </div>
 
@@ -35,7 +35,7 @@ export function ViewOnlyOverlay({ connector }: { connector: string }) {
 
         <Link
           to="/settings?tab=keys"
-          className="rounded-lg bg-[var(--color-primary)] px-4 py-2 text-xs font-semibold text-white transition-all hover:bg-[var(--color-primary-hover)] active:scale-[0.98]"
+          className="rounded-lg bg-[var(--color-primary-fill)] px-4 py-2 text-xs font-semibold text-[var(--on-primary)] transition-all hover:bg-[var(--color-primary-hover)] active:scale-[0.98]"
         >
           Add API keys
         </Link>

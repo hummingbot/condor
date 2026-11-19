@@ -15,6 +15,7 @@ import {
 } from "@/lib/api";
 import { formatRelativeTime, toMs } from "@/lib/formatters";
 import { formatRoutineName, type RoutineScope } from "@/lib/routineUtils";
+import { DockOpenLink } from "@/components/chat/DockOpenLink";
 
 /**
  * A row in the dock: one routine run.
@@ -173,6 +174,8 @@ export function DockRoutines({
           )}
         </div>
       )}
+      {/* The routines page: the whole library, its schedules and reports. */}
+      <DockOpenLink to="/routines" label="Open routines" />
     </>
   );
 }

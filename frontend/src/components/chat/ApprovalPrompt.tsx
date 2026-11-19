@@ -68,8 +68,8 @@ export function ApprovalPrompt({
       <header className="flex items-center gap-2 border-b border-[var(--chat-rule)] px-3 py-2">
         {!expired && (
           <span className="relative flex h-2 w-2 shrink-0" aria-hidden="true">
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--color-primary)] opacity-75" />
-            <span className="relative inline-flex h-2 w-2 rounded-full bg-[var(--color-primary)]" />
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--color-primary-fill)] opacity-75" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-[var(--color-primary-fill)]" />
           </span>
         )}
         <Hand className="h-4 w-4 shrink-0 text-[var(--color-primary)]" />
@@ -130,7 +130,7 @@ export function ApprovalPrompt({
           <>
             <button
               onClick={() => onResolve(request.request_id, true)}
-              className="rounded-md bg-[var(--color-primary)] px-4 py-1.5 text-sm font-semibold text-[var(--on-primary)] hover:bg-[var(--color-primary-hover)]"
+              className="rounded-md bg-[var(--color-primary-fill)] px-4 py-1.5 text-sm font-semibold text-[var(--on-primary)] hover:bg-[var(--color-primary-hover)]"
             >
               Allow
             </button>

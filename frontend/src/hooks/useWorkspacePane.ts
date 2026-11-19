@@ -14,6 +14,13 @@ export type WorkspacePane = {
   host: HTMLElement | null;
   setHost: (el: HTMLElement | null) => void;
   /**
+   * The slot under the pane, inside the same column — where the side column
+   * moves when the layout picker stacks the two panels (Chat + 2, stacked).
+   * Empty, and drawn as nothing, the rest of the time.
+   */
+  belowHost: HTMLElement | null;
+  setBelowHost: (el: HTMLElement | null) => void;
+  /**
    * Take the pane for `token`; the returned function gives it back.
    *
    * The first claim wins and later ones are refused, which is what keeps two

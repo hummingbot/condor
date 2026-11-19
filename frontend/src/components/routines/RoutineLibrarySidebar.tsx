@@ -114,7 +114,7 @@ export function RoutineLibrarySidebar({
           on
             ? agentish
               ? "bg-purple-500 text-white"
-              : "bg-[var(--color-primary)] text-white"
+              : "bg-[var(--color-primary-fill)] text-[var(--on-primary)]"
             : agentish
               ? "bg-purple-500/10 text-purple-400 hover:bg-purple-500/20"
               : "bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
@@ -214,7 +214,7 @@ export function RoutineLibrarySidebar({
                 {...(isActive ? { "data-active-source": true } : {})}
                 className={`flex w-full items-center justify-center py-3 transition-colors ${
                   isActive
-                    ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+                    ? "bg-[var(--color-primary-fill)]/10 text-[var(--color-primary)]"
                     : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
                 }`}
                 title={displayName}
@@ -239,7 +239,7 @@ export function RoutineLibrarySidebar({
               {...(isActive ? { "data-active-source": true } : {})}
               className={`block w-full rounded-lg border p-2.5 text-left transition-all ${
                 isActive
-                  ? "border-[var(--color-primary)]/40 bg-[var(--color-primary)]/5"
+                  ? "border-[var(--color-primary)]/40 bg-[var(--color-primary-fill)]/5"
                   : "border-[var(--color-border)] bg-[var(--color-bg)] hover:border-[var(--color-primary)]/30 hover:bg-[var(--color-surface-hover)]"
               }`}
             >

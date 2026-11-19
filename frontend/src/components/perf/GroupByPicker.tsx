@@ -45,7 +45,7 @@ export function GroupByPicker({
             title={preset.hint}
             className={`flex-1 rounded px-1 py-1 text-[10px] font-medium transition-colors ${
               active
-                ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                ? "bg-[var(--color-primary-fill)]/15 text-[var(--color-primary)]"
                 : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
             }`}
           >

@@ -349,7 +349,7 @@ export function ApiKeysSettings() {
               onClick={() => setFlow({ ...flow, walletChain: chain })}
               className={`flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
                 flow.walletChain === chain
-                  ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                  ? "bg-[var(--color-primary-fill)]/15 text-[var(--color-primary)]"
                   : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
               }`}
             >
@@ -412,7 +412,7 @@ export function ApiKeysSettings() {
                   }
                   className={`rounded-md border px-3 py-2 text-left text-sm transition-colors ${
                     alreadyConnected
-                      ? "border-[var(--color-primary)]/30 bg-[var(--color-primary)]/5 text-[var(--color-text-muted)] cursor-default"
+                      ? "border-[var(--color-primary)]/30 bg-[var(--color-primary-fill)]/5 text-[var(--color-text-muted)] cursor-default"
                       : "border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text)] hover:border-[var(--color-border-hover)] hover:bg-[var(--color-surface-hover)]"
                   }`}
                 >
@@ -506,7 +506,7 @@ export function ApiKeysSettings() {
               <button
                 onClick={() => addMut.mutate()}
                 disabled={addMut.isPending}
-                className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-4 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:opacity-50"
+                className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary-fill)] px-4 py-1.5 text-xs font-medium text-[var(--on-primary)] transition-colors hover:bg-[var(--color-primary-fill)]/80 disabled:opacity-50"
               >
                 {addMut.isPending && <Loader2 className="h-3 w-3 animate-spin" />}
                 Add Credential
@@ -559,7 +559,7 @@ export function ApiKeysSettings() {
             onClick={() => setFlow({ ...INITIAL_FLOW, step: "select-type" })}
             disabled={!isOwner}
             title={isOwner ? undefined : OWNER_ONLY_HINT}
-            className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-[var(--color-primary)]"
+            className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary-fill)] px-3 py-1.5 text-xs font-medium text-[var(--on-primary)] transition-colors hover:bg-[var(--color-primary-fill)]/80 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-[var(--color-primary-fill)]"
           >
             <Plus className="h-3.5 w-3.5" /> Add API Key
           </button>
@@ -661,7 +661,7 @@ export function ApiKeysSettings() {
                         </span>
                         {w.isDefault && (
                           <span
-                            className="flex items-center gap-0.5 rounded bg-[var(--color-primary)]/10 px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-primary)]"
+                            className="flex items-center gap-0.5 rounded bg-[var(--color-primary-fill)]/10 px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-primary)]"
                             title="Default wallet for this chain"
                           >
                             <Star className="h-2.5 w-2.5" /> default

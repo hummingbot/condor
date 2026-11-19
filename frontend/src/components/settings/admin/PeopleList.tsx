@@ -108,7 +108,7 @@ export function PeopleList({
               aria-pressed={active === t.key}
               className={`rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${
                 active === t.key
-                  ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                  ? "bg-[var(--color-primary-fill)]/15 text-[var(--color-primary)]"
                   : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
               }`}
             >

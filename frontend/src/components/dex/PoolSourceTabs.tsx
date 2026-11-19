@@ -14,17 +14,21 @@ import {
 
 
 /**
- * Pills rather than underlined tabs, because there are seven of them and they no
- * longer sit on one baseline: a wrapped underline reads as two broken rules across
+ * Pills rather than underlined tabs, because there are several groups of them
+ * and they do not always sit on one baseline: a wrapped underline reads as two broken rules across
  * the header, while a pill is legible on whatever row it lands on.
  */
 const TAB_BASE =
   "rounded-md px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap";
 
+/** The small caption heading each group of pills. */
+const GROUP_LABEL =
+  "mr-1 text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]";
+
 function tabClass(active: boolean) {
   return `${TAB_BASE} ${
     active
-      ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+      ? "bg-[var(--color-primary-fill)]/15 text-[var(--color-primary)]"
       : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
   }`;
 }
@@ -82,7 +86,7 @@ function ChainSelect({
             <span
               className={`h-1.5 w-1.5 shrink-0 rounded-full ${
                 c.network_id === network
-                  ? "bg-[var(--color-primary)]"
+                  ? "bg-[var(--color-primary-fill)]"
                   : "bg-transparent"
               }`}
             />
@@ -204,7 +208,7 @@ function DexFilter({
                 <span
                   className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border ${
                     active
-                      ? "border-[var(--color-primary)] bg-[var(--color-primary)] text-white"
+                      ? "border-[var(--color-primary)] bg-[var(--color-primary-fill)] text-[var(--on-primary)]"
                       : "border-[var(--color-border)]"
                   }`}
                 >
@@ -255,100 +259,128 @@ export function PoolSourceTabs({
   favoriteCount,
 }: Props) {
   const isSearch = source.kind === "gecko" && source.view === "token";
-  const searchLabel =
-    source.kind === "gateway"
-      ? "Filter pools by name…"
-      : "Paste a pool or token address…";
-  const searchShown = source.kind === "gateway" || isSearch;
   const showGatewayTabs = network.startsWith(GATEWAY_TAB_CHAIN);
+  /**
+   * Where a search goes back to when it is cleared.
+   *
+   * Search used to be a fourth tab beside Trending/Top/New — an action dressed
+   * as a list. The field is always on screen now: pasting an address into it is
+   * the search, and emptying it returns to the list the reader came from rather
+   * than leaving them on an empty results table.
+   */
+  const [lastList, setLastList] = useState<PoolSource>(
+    isSearch ? { kind: "gecko", view: "trending" } : source,
+  );
+  // A list remembered on one chain means nothing on another: the parent
+  // already resets to Trending when the chain changes, so this does too —
+  // otherwise clearing a search on Base brought back Solana's Meteora list.
+  // Adjusted during render (React's "reset state on prop change" pattern),
+  // not in an effect, so there is no frame with the stale list.
+  const [listNetwork, setListNetwork] = useState(network);
+  if (listNetwork !== network) {
+    setListNetwork(network);
+    setLastList({ kind: "gecko", view: "trending" });
+  }
+  const pick = (next: PoolSource) => {
+    setLastList(next);
+    onQueryChange("");
+    onSourceChange(next);
+  };
+  const onSearchInput = (value: string) => {
+    onQueryChange(value);
+    // On a Gateway list the field filters that list by name, in place.
+    if (source.kind === "gateway") return;
+    if (value.trim() && !isSearch) onSourceChange({ kind: "gecko", view: "token" });
+    if (!value.trim() && isSearch) onSourceChange(lastList);
+  };
+  const searchLabel =
+    source.kind === "gateway" ? "Filter pools by name…" : "Paste a pool or token address…";
 
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-[var(--color-border)] px-4 py-2">
-      {/* Wraps rather than scrolls. Seven short labels fit one row on any desktop
-          width, and on a phone a second row is reachable where a horizontal
-          scroller inside a vertically-scrolling page is largely not. */}
-      <ChainSelect
-        chains={chains}
-        network={network}
-        onChange={onNetworkChange}
-      />
+      {/* Wraps rather than scrolls: on a phone a second row is reachable where a
+          horizontal scroller inside a vertically-scrolling page is largely not. */}
+      <ChainSelect chains={chains} network={network} onChange={onNetworkChange} />
 
+      {/* Your own shortlist first and on its own: it is not a ranking like
+          Trending/Top/New, so sitting among them made it read as one. */}
+      <button
+        onClick={() => pick({ kind: "favorites" })}
+        className={`${tabClass(source.kind === "favorites")} flex items-center gap-1`}
+        title="Pools you starred"
+      >
+        <Star
+          className={`h-3 w-3 ${source.kind === "favorites" ? "fill-[var(--color-primary)] text-[var(--color-primary)]" : ""}`}
+        />
+        Favorites
+        {favoriteCount > 0 && (
+          <span className="text-[11px] text-[var(--color-text-muted)]">{favoriteCount}</span>
+        )}
+      </button>
+      <span aria-hidden className="h-4 w-px bg-[var(--color-border)]" />
+
+      {/* Lists to browse, and Gateway's own pools per venue, as two labelled
+          groups — they used to run together in one strip with the search
+          action and the favorites between them. */}
       <div className="flex flex-wrap items-center gap-0.5">
-        {GECKO_TABS.map((t) => (
+        <span className={GROUP_LABEL}>Browse</span>
+        {GECKO_TABS.filter((t) => t.view !== "token").map((t) => (
           <button
             key={t.view}
-            onClick={() => onSourceChange({ kind: "gecko", view: t.view })}
-            className={tabClass(
-              sameSource(source, { kind: "gecko", view: t.view }),
-            )}
+            onClick={() => pick({ kind: "gecko", view: t.view })}
+            className={tabClass(sameSource(source, { kind: "gecko", view: t.view }))}
           >
             {t.label}
           </button>
         ))}
-        {showGatewayTabs && (
-          <>
-            <span className="mx-1.5 h-4 w-px bg-[var(--color-border)]" />
-            {GATEWAY_TABS.map((t) => (
-              <button
-                key={t.connector}
-                onClick={() =>
-                  onSourceChange({ kind: "gateway", connector: t.connector })
-                }
-                className={tabClass(
-                  sameSource(source, { kind: "gateway", connector: t.connector }),
-                )}
-              >
-                {t.label}
-              </button>
-            ))}
-          </>
-        )}
-        <span className="mx-1.5 h-4 w-px bg-[var(--color-border)]" />
-        <button
-          onClick={() => onSourceChange({ kind: "favorites" })}
-          className={`${tabClass(source.kind === "favorites")} flex items-center gap-1`}
-          title="Pools you starred"
-        >
-          <Star
-            className={`h-3 w-3 ${source.kind === "favorites" ? "fill-[var(--color-primary)] text-[var(--color-primary)]" : ""}`}
-          />
-          Favorites
-          {favoriteCount > 0 && (
-            <span className="text-[10px] text-[var(--color-text-muted)]">
-              {favoriteCount}
-            </span>
-          )}
-        </button>
       </div>
 
+      {showGatewayTabs && (
+        <div className="flex flex-wrap items-center gap-0.5">
+          <span
+            className={GROUP_LABEL}
+            title="Pools Gateway lists for this venue — the ones it can open positions in"
+          >
+            On Gateway
+          </span>
+          {GATEWAY_TABS.map((t) => (
+            <button
+              key={t.connector}
+              onClick={() => pick({ kind: "gateway", connector: t.connector })}
+              className={tabClass(sameSource(source, { kind: "gateway", connector: t.connector }))}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+      )}
+
       <div className="ml-auto flex items-center gap-2">
-        {source.kind === "gecko" && (
-          <DexFilter
-            venues={venues}
-            selected={selectedDexes}
-            onChange={onDexesChange}
+        {/* The venue filter narrows the browse lists; a Gateway list is one
+            venue already, and a search result is one pool. */}
+        {source.kind === "gecko" && !isSearch && (
+          <DexFilter venues={venues} selected={selectedDexes} onChange={onDexesChange} />
+        )}
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-[var(--color-text-muted)]" />
+          <input
+            value={query}
+            onChange={(e) => onSearchInput(e.target.value)}
+            placeholder={searchLabel}
+            spellCheck={false}
+            aria-label={searchLabel}
+            className="w-64 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] py-1 pl-7 pr-6 text-xs text-[var(--color-text)] placeholder:text-[var(--color-text-muted)]"
           />
-        )}
-        {searchShown && (
-          <div className="relative">
-            <Search className="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-[var(--color-text-muted)]" />
-            <input
-              value={query}
-              onChange={(e) => onQueryChange(e.target.value)}
-              placeholder={searchLabel}
-              spellCheck={false}
-              className="w-64 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] py-1 pl-7 pr-6 text-xs text-[var(--color-text)] placeholder:text-[var(--color-text-muted)]"
-            />
-            {query && (
-              <button
-                onClick={() => onQueryChange("")}
-                className="absolute right-1.5 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-              >
-                <X className="h-3 w-3" />
-              </button>
-            )}
-          </div>
-        )}
+          {query && (
+            <button
+              onClick={() => onSearchInput("")}
+              aria-label="Clear search"
+              className="absolute right-1.5 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+            >
+              <X className="h-3 w-3" />
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );

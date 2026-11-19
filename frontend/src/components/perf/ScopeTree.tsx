@@ -190,7 +190,7 @@ function rowLabel(node: PerfNode, owners: readonly FleetOwner[]): string {
 function rowClass(active: boolean) {
   return `w-full text-left transition-all border-l-[3px] ${
     active
-      ? "bg-[var(--color-primary)]/15 border-l-[var(--color-primary)] shadow-[inset_0_0_0_1px_var(--color-primary)]/10"
+      ? "bg-[var(--color-primary-fill)]/15 border-l-[var(--color-primary)] shadow-[inset_0_0_0_1px_var(--color-primary)]/10"
       : "border-l-transparent hover:bg-[var(--color-surface-hover)]"
   }`;
 }
@@ -229,7 +229,7 @@ function ScopeRow({
           {...(active ? { "data-active-scope": true } : {})}
           className={`flex w-full items-center justify-center py-3 transition-colors ${
             active
-              ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+              ? "bg-[var(--color-primary-fill)]/15 text-[var(--color-primary)]"
               : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
           }`}
           title={node.label}

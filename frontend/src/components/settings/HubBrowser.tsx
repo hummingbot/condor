@@ -566,7 +566,7 @@ function AgentCard({
       className="flex h-full flex-col gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 transition-colors hover:border-[var(--color-primary)]/40"
     >
       <div className="flex items-start gap-2.5">
-        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-[var(--color-primary)]/10 text-[var(--color-primary)]">
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-[var(--color-primary-fill)]/10 text-[var(--color-primary)]">
           <Bot className="h-4 w-4" />
         </span>
         <div className="min-w-0 flex-1">
@@ -583,7 +583,7 @@ function AgentCard({
           {agent.validated && (
             <span
               title="Approved by Botcamp's review"
-              className="flex items-center gap-0.5 rounded border border-[var(--color-primary)]/30 bg-[var(--color-primary)]/10 px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-primary)]"
+              className="flex items-center gap-0.5 rounded border border-[var(--color-primary)]/30 bg-[var(--color-primary-fill)]/10 px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-primary)]"
             >
               <BadgeCheck className="h-3 w-3" /> Validated
             </span>

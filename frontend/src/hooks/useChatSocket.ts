@@ -733,6 +733,12 @@ export function useChatSocket() {
   // waiting behind the one in front of it. Keyed by slot like everything else
   // here, and short-lived: the first fragment of the answer clears it.
   const [queuedSlots, setQueuedSlots] = useState<Record<string, true>>({});
+  // Conversations whose message is on the wire and whose answer has not begun.
+  // Set when the frame goes out, cleared when the answer starts (it is then
+  // `streamingSlots`) or the turn ends any other way — `prompt_done`, Stop, an
+  // error, the session going. Reading "the last message is the user's" instead
+  // left a chat stopped before its first token answering for ever.
+  const [sentSlots, setSentSlots] = useState<Record<string, true>>({});
   // Keyed by the conversation that raised it, like every other per-slot piece
   // of state here. As a single scalar this was both misattributed — the banner
   // rendered in whatever tab was open — and lossy: a second confirmation
@@ -790,6 +796,12 @@ export function useChatSocket() {
   // rapid-fire, and a fresh object per chunk would re-render every consumer.
   const clearQueued = useCallback((slotId: string) => {
     setQueuedSlots((prev) => {
+      if (!(slotId in prev)) return prev;
+      const next = { ...prev };
+      delete next[slotId];
+      return next;
+    });
+    setSentSlots((prev) => {
       if (!(slotId in prev)) return prev;
       const next = { ...prev };
       delete next[slotId];
@@ -1074,6 +1086,7 @@ export function useChatSocket() {
           return;
         }
       }
+      setSentSlots((prev) => (prev[slotId] ? prev : { ...prev, [slotId]: true }));
       send({
         action: "send_message",
         slot_id: slotId,
@@ -1526,6 +1539,10 @@ export function useChatSocket() {
                 info.slot_id,
                 resync,
               );
+              // A turn that outlived the page is still answering, and its
+              // frames come to this socket now. Without this a reloaded chat
+              // read as idle and the rail closed it behind the reader.
+              if (info.is_busy) startStreaming(info.slot_id);
             }
             // A roster with anything on it is the conversation to be in, so
             // there is nothing to go looking for. A slot the backend reaped
@@ -1997,6 +2014,7 @@ export function useChatSocket() {
       noteFrame,
       prewarmLatest,
       queryClient,
+      startStreaming,
       stopStreaming,
       updateSlotMessages,
       uploadAndSend,
@@ -2344,6 +2362,11 @@ export function useChatSocket() {
     (slotId: string | null | undefined) => !!slotId && slotId in queuedSlots,
     [queuedSlots],
   );
+  /** Has *this* conversation sent a message its answer has not started on? */
+  const isSlotAwaiting = useCallback(
+    (slotId: string | null | undefined) => !!slotId && slotId in sentSlots,
+    [sentSlots],
+  );
   // What *one* conversation is being asked to approve — and nothing else. A
   // request raised elsewhere stays in the map, where the tab strip badges it,
   // so it is visible without being answerable from the wrong chat. A selector
@@ -2373,6 +2396,7 @@ export function useChatSocket() {
     streamingSlots,
     isSlotStreaming,
     isSlotQueued,
+    isSlotAwaiting,
     permissionFor,
     permissionRequests,
     resolveSlotId,

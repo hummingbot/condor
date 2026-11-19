@@ -291,7 +291,7 @@ function BotDefaultsCard({ server }: { server: string }) {
             onClick={() => saveMut.mutate(changes)}
             disabled={!canSave || saveMut.isPending}
             title={isOwner ? undefined : OWNER_ONLY_HINT}
-            className="flex shrink-0 items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex shrink-0 items-center gap-1.5 rounded-md bg-[var(--color-primary-fill)] px-3 py-1.5 text-xs font-medium text-[var(--on-primary)] transition-colors hover:bg-[var(--color-primary-fill)]/80 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {saveMut.isPending ? (
               <Loader2 className="h-3 w-3 animate-spin" />
@@ -452,7 +452,7 @@ function UpgradeCard({ server }: { server: string }) {
             onClick={() => setConfirming(true)}
             disabled={!canPress}
             title={isOwner ? (blocked ?? undefined) : OWNER_ONLY_HINT}
-            className="flex shrink-0 items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex shrink-0 items-center gap-1.5 rounded-md bg-[var(--color-primary-fill)] px-3 py-1.5 text-xs font-medium text-[var(--on-primary)] transition-colors hover:bg-[var(--color-primary-fill)]/80 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <ArrowUpCircle className="h-3 w-3" />
             Upgrade

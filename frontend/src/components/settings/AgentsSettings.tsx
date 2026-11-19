@@ -529,7 +529,7 @@ function PossibleKeysCheck({
         <button
           onClick={() => onConfirm(Array.from(notKeys))}
           disabled={busy || !allChecked}
-          className="rounded border border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 px-2 py-0.5 font-semibold text-[var(--color-primary)] disabled:opacity-50"
+          className="rounded border border-[var(--color-primary)]/40 bg-[var(--color-primary-fill)]/10 px-2 py-0.5 font-semibold text-[var(--color-primary)] disabled:opacity-50"
         >
           Continue
         </button>
@@ -750,7 +750,7 @@ export function PublishAgentButton({ slug }: { slug: string }) {
           <button
             onClick={send}
             disabled={busy}
-            className="shrink-0 rounded border border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 px-2 py-0.5 font-semibold text-[var(--color-primary)] disabled:opacity-50"
+            className="shrink-0 rounded border border-[var(--color-primary)]/40 bg-[var(--color-primary-fill)]/10 px-2 py-0.5 font-semibold text-[var(--color-primary)] disabled:opacity-50"
           >
             {busy ? "Publishing…" : "Publish"}
           </button>

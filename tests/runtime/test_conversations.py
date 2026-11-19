@@ -1681,3 +1681,75 @@ def test_a_turn_written_before_the_order_existed_still_reads(conv_root):
     assert turn.events == []
     assert turn.thought == "thinking"
     assert turn.tool_calls[0]["title"] == "get_prices"
+
+
+# ── Empty conversations ──
+
+
+def test_a_conversation_nothing_was_said_in_is_discarded(conv_root):
+    meta = conversations.new_conversation(42, "web")
+    assert conversations.discard_if_empty(42, meta.id) is True
+    assert conversations.get_conversation(42, meta.id) is None
+
+
+def test_a_conversation_with_a_turn_is_kept(conv_root):
+    meta = conversations.new_conversation(42, "web")
+    conversations.append_turn(42, meta.id, TurnEntry(role="user", text="hi"))
+    assert conversations.discard_if_empty(42, meta.id) is False
+    assert conversations.get_conversation(42, meta.id) is not None
+
+
+def test_a_renamed_empty_conversation_is_kept(conv_root):
+    meta = conversations.new_conversation(42, "web")
+    conversations.rename(42, meta.id, "Plan for tomorrow")
+    assert conversations.discard_if_empty(42, meta.id) is False
+
+
+def test_skip_empty_leaves_empties_out_before_the_limit(conv_root):
+    talked = conversations.new_conversation(42, "web")
+    conversations.append_turn(42, talked.id, TurnEntry(role="user", text="hi"))
+    for _ in range(3):
+        conversations.new_conversation(42, "web")
+
+    listed = conversations.list_conversations(42, limit=1, skip_empty=True)
+    assert [m.id for m in listed] == [talked.id]
+    # Without the flag every caller still sees them (reflection, sharing sweep).
+    assert len(conversations.list_conversations(42, limit=0)) == 4
+
+
+# ── Archive, and an agent's chats going with it ──
+
+
+def test_archive_and_restore(conv_root):
+    meta = conversations.new_conversation(42, "web")
+    assert conversations.set_archived(42, meta.id, True) is True
+    assert conversations.get_conversation(42, meta.id).archived is True
+    conversations.set_archived(42, meta.id, False)
+    assert conversations.get_conversation(42, meta.id).archived is False
+
+
+def test_a_turn_still_answering_does_not_resurrect_a_deleted_chat(conv_root):
+    meta = new_conversation(USER, WEB)
+    rec = Recorder(USER, meta.id, "still thinking")
+    rec.observe(RuntimeEvent(type="text", data={"text": "half an answer"}))
+
+    assert conversations.delete_conversation(USER, meta.id) is True
+    rec.flush()  # the answer ends after the chat is gone
+
+    assert not conversations._conv_dir(USER, meta.id).exists()
+
+
+def test_closing_a_tab_mid_first_answer_keeps_the_chat(conv_root):
+    meta = new_conversation(USER, WEB)
+    rec = Recorder(USER, meta.id, "first question")
+    rec.observe(RuntimeEvent(type="text", data={"text": "still answering"}))
+
+    # The meta reads empty until the recorder flushes; that is not "empty".
+    assert conversations.discard_if_empty(USER, meta.id) is False
+    rec.flush()
+    assert conversations.get_conversation(USER, meta.id).turn_count == 2
+
+
+def test_a_chat_closed_without_a_word_is_still_discarded(conv_root):
+    meta = new_conversation(USER, WEB)
+    assert conversations.discard_if_empty(USER, meta.id) is True

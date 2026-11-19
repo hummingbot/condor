@@ -7,7 +7,7 @@ import { api, type ConsolidatedPosition } from "@/lib/api";
 import { candleChannelKey, candleStore } from "@/lib/candle-store";
 import type { ChartLineSlot, ExtraLine, PickSlot } from "@/components/executor/types";
 import { createOverlayTooltipView, getExecutorColor, type ExecutorOverlay } from "@/lib/executor-overlays";
-import { getThemeColors, pnlHexColor } from "@/lib/theme-colors";
+import { getThemeColors, pnlHexColor, withAlpha } from "@/lib/theme-colors";
 import { roundToPricePrecision } from "@/lib/formatters";
 import { createDragHitPrimitive, type DragTarget } from "./priceLineDrag";
 import { usePriceLineDrag } from "./usePriceLineDrag";
@@ -549,7 +549,7 @@ export function TradeChart({
         },
       });
     });
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "data-colorblind"] });
     return () => observer.disconnect();
   }, [chartReady]);
 
@@ -815,12 +815,8 @@ export function TradeChart({
       const dimAlpha = 0.2;
 
       function applyDim(c: string): string {
-        if (!isDimmed) return c;
-        // Add alpha to hex colors
-        if (c.startsWith("#") && c.length === 7) return c + "33";
-        if (c.startsWith("#") && c.length === 4) return c + "3";
-        if (c.startsWith("rgba")) return c.replace(/[\d.]+\)$/, `${dimAlpha})`);
-        return c;
+        // Hex, rgb() and the theme's hsl() alike.
+        return isDimmed ? withAlpha(c, dimAlpha) : c;
       }
 
       const box = overlay.gridBox;
@@ -1112,7 +1108,7 @@ export function TradeChart({
             {pickLabel(activePickField, lineLabels)}{" "}
             price
           </p>
-          <span className="animate-pulse rounded bg-[var(--color-primary)]/20 px-2 py-0.5 text-xs text-[var(--color-primary)]">
+          <span className="animate-pulse rounded bg-[var(--color-primary-fill)]/20 px-2 py-0.5 text-xs text-[var(--color-primary)]">
             Pick mode:{" "}
             {pickLabel(activePickField, lineLabels)}
           </span>

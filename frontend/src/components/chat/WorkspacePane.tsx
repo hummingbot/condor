@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { DockSplitHandle } from "@/components/chat/DockSplitHandle";
+import { useDockSplit } from "@/hooks/useDockSplit";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 import {
   useWorkspacePane,
@@ -7,7 +9,12 @@ import {
   type PaneProfile,
   type WorkspacePane,
 } from "@/hooks/useWorkspacePane";
-import { PANE_FRAC_KEY, PANE_FRAC_TUNE_KEY } from "@/lib/sessionState";
+import {
+  PANE_FRAC_KEY,
+  PANE_FRAC_TUNE_KEY,
+  SIDE_SPLIT_KEY,
+  STACK_SPLIT_KEY,
+} from "@/lib/sessionState";
 
 /**
  * Below this the workspace has no room for another column, so a sheet keeps its
@@ -94,6 +101,7 @@ export function WorkspacePaneProvider({
   children: React.ReactNode;
 }) {
   const [host, setHost] = useState<HTMLElement | null>(null);
+  const [belowHost, setBelowHost] = useState<HTMLElement | null>(null);
   const [holder, setHolder] = useState<string | null>(null);
   const [wide, setWide] = useState(() => window.matchMedia(WIDE).matches);
   /** Which kind of pane the split is currently about — see `PANE_PROFILES`. */
@@ -147,6 +155,8 @@ export function WorkspacePaneProvider({
     () => ({
       host,
       setHost,
+      belowHost,
+      setBelowHost,
       claim,
       holder,
       open: holder !== null,
@@ -155,7 +165,7 @@ export function WorkspacePaneProvider({
       setFrac,
       defaultFrac: PANE_PROFILES[profile].frac,
     }),
-    [host, claim, holder, wide, frac, setFrac, profile],
+    [host, belowHost, claim, holder, wide, frac, setFrac, profile],
   );
 
   return (
@@ -236,8 +246,8 @@ function PaneResizeHandle({
       onKeyDown={onKeyDown}
       onDoubleClick={() => setFrac(defaultFrac)}
       title="Drag to resize — double-click to reset"
-      className={`w-1.5 shrink-0 cursor-col-resize transition-colors hover:bg-[var(--color-primary)]/30 focus:outline-none focus-visible:bg-[var(--color-primary)]/30 ${
-        isDragging ? "bg-[var(--color-primary)]/30" : ""
+      className={`w-1.5 shrink-0 cursor-col-resize transition-colors hover:bg-[var(--color-primary-fill)]/30 focus:outline-none focus-visible:bg-[var(--color-primary-fill)]/30 ${
+        isDragging ? "bg-[var(--color-primary-fill)]/30" : ""
       }`}
     />
   );
@@ -251,34 +261,86 @@ function PaneResizeHandle({
  * The width is a ratio rather than a measurement, so the two columns keep their
  * proportions when the window changes and only the drag has to measure at all.
  */
-export function WorkspacePaneOutlet() {
+export function WorkspacePaneOutlet({
+  split: dir = null,
+}: {
+  /**
+   * The layout picker's free "Chat + 2": the pane and the slot beside it both
+   * hold a panel. `col` puts the second under the first (stacked), `row`
+   * beside it (side by side); each draws its seam and divides by its own
+   * remembered share. `null`: just the pane.
+   */
+  split?: "col" | "row" | null;
+} = {}) {
   const pane = useWorkspacePane();
+  // Before the early return: hooks run on every render. Each arrangement keeps
+  // its own seam — a stack split 50/50 says nothing about how wide a side
+  // column should be.
+  const stackSplit = useDockSplit(STACK_SPLIT_KEY);
+  const sideSplit = useDockSplit(SIDE_SPLIT_KEY, 0.6);
   if (!pane) return null;
   // Destructured, not read through `pane` in the JSX: the ref lint rule reads
   // any member of an object whose property is passed as `ref` as a ref itself.
-  const { setHost, open, frac, setFrac, defaultFrac } = pane;
+  const { setHost, setBelowHost, open, frac, setFrac, defaultFrac, canSplit } = pane;
+  // Too narrow to sit beside the chat: the split becomes what every sheet is
+  // at this width, an overlay over the transcript, stacked — rather than a
+  // 640 px column that squeezes the chat to nothing.
+  const overlay = dir !== null && !canSplit;
+  const row = dir === "row" && !overlay;
+  const split = row ? sideSplit : stackSplit;
+  const shown = open || dir !== null;
   return (
     <>
-      {open && (
+      {shown && !overlay && (
         <PaneResizeHandle
           frac={frac}
           setFrac={setFrac}
           defaultFrac={defaultFrac}
         />
       )}
-      <aside
-        ref={setHost}
-        aria-label="Workspace pane"
-        // `flex-grow` against the chat's `flex-1`: the two grow in the ratio the
-        // reader left them in, whatever width the row turns out to have. Inline,
-        // so it overrides the `flex-1` shorthand's own grow.
-        style={open ? { flexGrow: frac / (1 - frac) } : undefined}
+      {/* One column (or row): the pane, and the slot a free "Chat + 2" fills
+          under or beside it. `flex-grow` against the chat's `flex-1`: the two
+          grow in the ratio the reader left them in, whatever width the row
+          turns out to have. Inline, so it overrides the `flex-1` shorthand. */}
+      <div
+        style={shown && !overlay ? { flexGrow: frac / (1 - frac) } : undefined}
         className={
-          open
-            ? "flex min-w-[400px] flex-1 flex-col border-l border-[var(--color-border)] bg-[var(--color-bg)]"
-            : "hidden"
+          // Split, the column is up even when no sheet holds the pane: the
+          // first panel may be Tasks/Routines, which draw here without a claim.
+          !shown
+            ? "hidden"
+            : overlay
+              ? "absolute inset-y-0 right-0 z-30 flex w-[min(480px,100%)] flex-col border-l border-[var(--color-border)] bg-[var(--color-bg)] shadow-xl"
+              : `flex min-h-0 flex-1 border-l border-[var(--color-border)] bg-[var(--color-bg)] ${
+                  row ? "min-w-[640px] flex-row" : "min-w-[400px] flex-col"
+                }`
         }
-      />
+      >
+        <aside
+          ref={setHost}
+          aria-label="Workspace pane"
+          // `basis-0` so the two halves divide by their grow alone — the shares
+          // the seam sets — rather than by how big their content happens to be.
+          style={dir ? { flexGrow: split.frac } : undefined}
+          className="flex min-h-0 min-w-0 flex-1 basis-0 flex-col"
+        />
+        {dir && (
+          <DockSplitHandle
+            axis={row ? "x" : "y"}
+            frac={split.frac}
+            setFrac={split.setFrac}
+            defaultFrac={split.defaultFrac}
+            label={row ? "Resize the side-by-side panels" : "Resize the stacked panels"}
+          />
+        )}
+        <div
+          ref={setBelowHost}
+          style={dir ? { flexGrow: 1 - split.frac } : undefined}
+          className={`flex min-h-0 min-w-0 flex-1 basis-0 flex-col border-[var(--color-border)] empty:hidden ${
+            row ? "border-l" : "border-t"
+          }`}
+        />
+      </div>
     </>
   );
 }

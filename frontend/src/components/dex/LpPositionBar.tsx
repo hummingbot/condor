@@ -63,7 +63,7 @@ export function LpPositionBar({
             title={`${pos.provider || "LP"} position ${pos.id}`}
             className={`flex flex-1 flex-wrap items-center gap-x-4 gap-y-1 rounded-md border px-3 py-1.5 text-left text-[11px] transition-colors ${
               selected
-                ? "border-[var(--color-primary)] bg-[var(--color-primary)]/5"
+                ? "border-[var(--color-primary)] bg-[var(--color-primary-fill)]/5"
                 : "border-[var(--color-border)] bg-[var(--color-bg)] hover:bg-[var(--color-surface-hover)]"
             }`}
           >

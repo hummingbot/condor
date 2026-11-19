@@ -7,10 +7,12 @@ import { NoServerCard } from "@/components/NoServerCard";
 import { LpPositions } from "@/components/dex/LpPositions";
 import { PoolBrowser } from "@/components/dex/PoolBrowser";
 import { PoolSourceTabs } from "@/components/dex/PoolSourceTabs";
+import { GatewayDownBanner } from "@/components/dex/GatewayDownBanner";
 import { UpstreamNotice } from "@/components/dex/UpstreamNotice";
 import { poolLabel } from "@/components/dex/format";
 import { GATEWAY_TAB_CHAIN, type PoolSource } from "@/components/dex/pool-source";
 import { useDexUpstream } from "@/hooks/useDexUpstream";
+import { useGatewayStatus } from "@/hooks/useGatewayStatus";
 import { useServer } from "@/hooks/useServer";
 import { api, type PoolSummary } from "@/lib/api";
 import { useDexFavorites } from "@/lib/dexFavorites";
@@ -54,6 +56,7 @@ export function Dex() {
   // Everything on this page comes from one shared GeckoTerminal budget; when it
   // is spent the tables empty out, so the reason is shown above them.
   const upstream = useDexUpstream(server ?? null);
+  const gateway = useGatewayStatus(server);
   const [source, setSource] = useState<PoolSource>({
     kind: "gecko",
     view: "trending",
@@ -135,6 +138,10 @@ export function Dex() {
   const effectiveQuery =
     source.kind === "gateway" || isSearch ? debouncedQuery : "";
   const isGateway = source.kind === "gateway";
+  // The venue filter narrows the browse lists only. A search looks for one
+  // token or pool wherever it trades, and the filter is hidden while it runs —
+  // sending it anyway emptied results with nothing on screen saying why.
+  const effectiveDexes = isGateway || isSearch ? [] : dexes;
   const enabled =
     !!server &&
     source.kind !== "favorites" &&
@@ -153,7 +160,7 @@ export function Dex() {
         : "favorites",
     isGateway ? "" : network,
     effectiveQuery,
-    isGateway ? "" : dexes.join(","),
+    effectiveDexes.join(","),
   ];
 
   const {
@@ -181,7 +188,7 @@ export function Dex() {
               network,
               view: source.kind === "gecko" ? source.view : "trending",
               query: effectiveQuery || undefined,
-              dexes,
+              dexes: effectiveDexes,
               limit: PAGE_SIZE,
               page,
             },
@@ -353,6 +360,12 @@ export function Dex() {
       <LpPositions server={server} />
 
       <div className="overflow-hidden rounded-lg border border-[var(--color-border)]">
+        {gateway.down && (
+          <GatewayDownBanner
+            className="border-b"
+            detail="You can browse pools, but the On Gateway lists, swaps and liquidity need it."
+          />
+        )}
         <UpstreamNotice state={upstream} className="border-b" />
 
         <PoolSourceTabs

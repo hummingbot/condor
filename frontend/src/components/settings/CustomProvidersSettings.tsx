@@ -180,7 +180,7 @@ function AddProviderForm({
 
   if (result) {
     return (
-      <section className="space-y-3 rounded-lg border border-[var(--color-primary)]/40 bg-[var(--color-primary)]/5 px-3 py-3">
+      <section className="space-y-3 rounded-lg border border-[var(--color-primary)]/40 bg-[var(--color-primary-fill)]/5 px-3 py-3">
         <p className="flex items-center gap-2 text-sm text-[var(--color-text)]">
           <Check className="h-4 w-4 text-[var(--color-primary)]" />
           Saved <span className="font-medium">{result.name}</span> — {result.count}{" "}
@@ -191,7 +191,7 @@ function AddProviderForm({
         </p>
         <button
           onClick={onDone}
-          className="rounded-lg bg-[var(--color-primary)] px-3 py-1.5 text-sm font-medium text-white transition-opacity hover:opacity-90"
+          className="rounded-lg bg-[var(--color-primary-fill)] px-3 py-1.5 text-sm font-medium text-[var(--on-primary)] transition-opacity hover:opacity-90"
         >
           Done
         </button>
@@ -250,7 +250,7 @@ function AddProviderForm({
         <button
           onClick={() => add.mutate()}
           disabled={!baseUrl.trim() || add.isPending}
-          className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+          className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-[var(--color-primary-fill)] px-4 py-2 text-sm font-medium text-[var(--on-primary)] transition-opacity hover:opacity-90 disabled:opacity-50"
         >
           {add.isPending ? (
             <>

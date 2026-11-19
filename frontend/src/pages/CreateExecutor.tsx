@@ -700,7 +700,7 @@ export function CreateExecutor() {
                 onClick={() => gridDispatch({ type: "SET_FIELD", field: "interval", value: iv })}
                 className={`px-2.5 py-1 text-xs ${
                   gridState.interval === iv
-                    ? "bg-[var(--color-primary)] text-white"
+                    ? "bg-[var(--color-primary-fill)] text-[var(--on-primary)]"
                     : "bg-[var(--color-bg)] text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
                 }`}
               >
@@ -718,7 +718,7 @@ export function CreateExecutor() {
                   onClick={() => gridDispatch({ type: "SET_FIELD", field: "lookbackSeconds", value: opt.seconds })}
                   className={`px-2 py-1 text-xs ${
                     gridState.lookbackSeconds === opt.seconds
-                      ? "bg-[var(--color-primary)] text-white"
+                      ? "bg-[var(--color-primary-fill)] text-[var(--on-primary)]"
                       : "bg-[var(--color-bg)] text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
                   }`}
                 >
@@ -782,7 +782,7 @@ export function CreateExecutor() {
           </div>
           {/* Horizontal resize handle */}
           <div
-            className="group/hdrag relative h-1.5 shrink-0 cursor-row-resize border-y border-[var(--color-border)] bg-[var(--color-bg)] hover:bg-[var(--color-primary)]/10 active:bg-[var(--color-primary)]/20 transition-colors"
+            className="group/hdrag relative h-1.5 shrink-0 cursor-row-resize border-y border-[var(--color-border)] bg-[var(--color-bg)] hover:bg-[var(--color-primary-fill)]/10 active:bg-[var(--color-primary-fill)]/20 transition-colors"
             onMouseDown={startVDrag}
           >
             <div className="absolute inset-x-0 top-1/2 mx-auto h-px w-12 -translate-y-1/2 rounded bg-amber-400/60 group-hover/hdrag:bg-amber-400 transition-colors" />
@@ -816,7 +816,7 @@ export function CreateExecutor() {
 
         {/* Vertical resize handle */}
         <div
-          className="group/vdrag relative w-1.5 shrink-0 cursor-col-resize border-x border-[var(--color-border)] bg-[var(--color-bg)] hover:bg-[var(--color-primary)]/10 active:bg-[var(--color-primary)]/20 transition-colors"
+          className="group/vdrag relative w-1.5 shrink-0 cursor-col-resize border-x border-[var(--color-border)] bg-[var(--color-bg)] hover:bg-[var(--color-primary-fill)]/10 active:bg-[var(--color-primary-fill)]/20 transition-colors"
           onMouseDown={startHDrag}
         >
           <div className="absolute inset-y-0 left-1/2 my-auto h-12 w-px -translate-x-1/2 rounded bg-amber-400/60 group-hover/vdrag:bg-amber-400 transition-colors" />
@@ -909,7 +909,7 @@ export function CreateExecutor() {
                   <button
                     onClick={() => createMutation.mutate()}
                     disabled={!caps.canTrade || !activeValidation.valid || createMutation.isPending}
-                    className="flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2.5 text-sm font-bold text-white transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--color-primary-fill)] px-4 py-2.5 text-sm font-bold text-[var(--on-primary)] transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {createMutation.isPending ? (
                       <Loader2 className="h-4 w-4 animate-spin" />

@@ -64,7 +64,10 @@ def _meta_or_404(owner_id: int, conversation_id: str) -> ConversationMeta:
 
 
 class RenameRequest(BaseModel):
-    title: str
+    """A partial update: rename, archive/restore, or both."""
+
+    title: str | None = None
+    archived: bool | None = None
 
 
 @router.get("", response_model=list[ConversationMeta])
@@ -76,9 +79,12 @@ async def list_conversations(
     """Every conversation the caller has ever held, newest first.
 
     One keyspace across surfaces, so a chat started in Telegram is listed here
-    exactly like one started in the dashboard.
+    exactly like one started in the dashboard. A chat opened and left without
+    a message is not one, and is not listed.
     """
-    return conversations.list_conversations(_owner(user, user_id), limit=limit)
+    return conversations.list_conversations(
+        _owner(user, user_id), limit=limit, skip_empty=True
+    )
 
 
 @router.get("/{conversation_id}")
@@ -107,7 +113,10 @@ async def rename_conversation(
 ):
     owner_id = _owner(user, user_id)
     _meta_or_404(owner_id, conversation_id)
-    conversations.rename(owner_id, conversation_id, body.title)
+    if body.title is not None:
+        conversations.rename(owner_id, conversation_id, body.title)
+    if body.archived is not None:
+        conversations.set_archived(owner_id, conversation_id, body.archived)
     return _meta_or_404(owner_id, conversation_id)
 
 
@@ -131,7 +140,17 @@ async def delete_conversation(
     """
     owner_id = _owner(user, user_id)
     _meta_or_404(owner_id, conversation_id)
+    return await forget_conversation(owner_id, conversation_id)
 
+
+async def forget_conversation(owner_id: int, conversation_id: str) -> dict:
+    """Unshare, stop whatever is answering, then delete. The one way a chat goes.
+
+    Shared by the DELETE route and by deleting an agent (which takes its chats
+    with it), so neither can skip the unshare — losing the delete token would
+    leave the shared copy online with nothing able to remove it — or leave a
+    session answering into a directory that no longer exists.
+    """
     unshared = False
     try:
         from condor.sharing import share as sharing
@@ -157,6 +176,22 @@ async def delete_conversation(
         "sessions_destroyed": detached,
         "unshared": unshared,
     }
+
+
+async def forget_for_agent(owner_id: int, agent_slug: str) -> int:
+    """Forget every chat this user had with ``agent_slug``; how many went.
+
+    Called when the agent itself is deleted. Left behind, its chats are bound to
+    a slug nothing answers to and read in the rail as a duplicate agent. Other
+    users' chats with the same agent are theirs to delete.
+    """
+    gone = 0
+    for meta in conversations.list_conversations(
+        owner_id, limit=0, agent_slug=agent_slug
+    ):
+        if (await forget_conversation(owner_id, meta.id))["deleted"]:
+            gone += 1
+    return gone
 
 
 # ── Attachments ──

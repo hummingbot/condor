@@ -8,7 +8,7 @@ import { useEscapeKey } from "@/hooks/useEscapeKey";
  * Renders the overlay + card + Cancel + destructive button shell that was
  * previously copy-pasted across Agents.tsx and AgentDetail.tsx (ARCH-059).
  * The destructive button uses the themed `bg-[var(--color-red)]` token so it
- * honors the colorblind theme's red remap (index.css), matching the editor
+ * honors the colour-blind palette's red remap (index.css), matching the editor
  * dialogs (EditorDialogs.tsx) instead of a hardcoded `bg-red-500`.
  *
  * Closes on Escape via `useEscapeKey` (CORR-077) while `open` is true.
