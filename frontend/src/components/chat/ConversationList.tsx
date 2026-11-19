@@ -485,7 +485,9 @@ export const ConversationList = memo(function ConversationList({
       </div>
 
       {foot.length > 0 && (
-        <div className="flex shrink-0 flex-col gap-0.5 border-t border-[var(--color-border)] py-1">
+        // Its own scroll past a third of the column, so an archive opened
+        // with many chats never pushes the agent list off screen.
+        <div className="flex max-h-[38%] shrink-0 flex-col gap-0.5 overflow-y-auto border-t border-[var(--color-border)] py-1">
           {foot.map((g) => renderGroup(g))}
         </div>
       )}
