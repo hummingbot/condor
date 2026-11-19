@@ -10,6 +10,7 @@ Features:
 """
 
 import asyncio
+import functools
 import hashlib
 import logging
 import time
@@ -121,6 +122,91 @@ def _schedule_tz(schedule: dict) -> tzinfo:
 _continuous_tasks: dict[str, asyncio.Task] = globals().get(
     "_continuous_tasks", {}
 )  # instance_id -> Task
+
+# The firing of a scheduled routine (once / interval / daily) that is executing
+# right now, per instance. A firing runs inside the JobQueue's own task, not one
+# in ``_continuous_tasks``, so removing the job only stops FUTURE firings: Stop
+# used to report success while a firing already inside ``run_fn`` kept going.
+# Kept across hot reload for the same reason as ``_continuous_tasks``.
+_scheduled_runs: dict[str, set[asyncio.Task]] = globals().get("_scheduled_runs", {})
+
+
+def _cancel_task(task: asyncio.Task) -> None:
+    """Cancel ``task`` from whatever loop or thread the stop arrives on.
+
+    The dashboard's Stop can run on another loop (a worker thread); a bare
+    ``task.cancel()`` from there is not thread-safe.
+    """
+    if task.done():
+        return
+    loop = task.get_loop()
+    try:
+        running = asyncio.get_running_loop()
+    except RuntimeError:
+        running = None
+    if running is loop:
+        task.cancel()
+    else:
+        loop.call_soon_threadsafe(task.cancel)
+
+
+def _cancel_scheduled_runs(instance_id: str) -> int:
+    """Cancel every in-flight firing of ``instance_id``. Returns how many.
+
+    The firing is dropped from ``_scheduled_runs`` before it is cancelled, which
+    is how :func:`_stoppable_job` tells a Stop from any other cancellation.
+    """
+    tasks = _scheduled_runs.pop(instance_id, set())
+    current = None
+    try:
+        current = asyncio.current_task()
+    except RuntimeError:
+        pass
+    cancelled = 0
+    for task in tasks:
+        if task is current or task.done():
+            continue
+        _cancel_task(task)
+        cancelled += 1
+    if cancelled:
+        logger.info(f"Cancelled {cancelled} in-flight run(s) of instance {instance_id}")
+    return cancelled
+
+
+def _stoppable_job(callback):
+    """Make a scheduled routine's job callback cancellable by Stop.
+
+    The firing's task is recorded for its whole run, routine and result
+    delivery included, so a Stop cancels the run in progress rather than only
+    the next one. A cancellation that came from a Stop ends the firing quietly;
+    any other (shutdown) propagates as before.
+    """
+
+    @functools.wraps(callback)
+    async def wrapper(context: CallbackContext) -> None:
+        instance_id = (getattr(context.job, "data", None) or {}).get("instance_id")
+        task = asyncio.current_task()
+        if not instance_id or task is None:
+            await callback(context)
+            return
+        _scheduled_runs.setdefault(instance_id, set()).add(task)
+        try:
+            await callback(context)
+        except asyncio.CancelledError:
+            if task in _scheduled_runs.get(instance_id, set()):
+                raise
+            # Popped by a stop: the cancellation was ours, and it is done.
+            if hasattr(task, "uncancel"):
+                task.uncancel()
+            logger.info(f"Scheduled run of instance {instance_id} stopped mid-run")
+        finally:
+            runs = _scheduled_runs.get(instance_id)
+            if runs is not None:
+                runs.discard(task)
+                if not runs:
+                    _scheduled_runs.pop(instance_id, None)
+
+    return wrapper
 
 
 # =============================================================================
@@ -348,6 +434,9 @@ def _stop_instance(
         task.cancel()
         logger.info(f"Cancelled continuous task for instance {instance_id}")
 
+    # A scheduled firing already inside run_fn is not stopped by removing its job
+    _cancel_scheduled_runs(instance_id)
+
     # Remove from instances
     instances = _get_instances(context)
     if instance_id in instances:
@@ -396,8 +485,12 @@ def _register_stopper(
                 job.schedule_removal()
 
         task = _continuous_tasks.pop(instance_id, None)
-        if task and not task.done():
-            task.cancel()
+        if task is not None:
+            _cancel_task(task)
+        # Removing the job stops only future firings; one already inside
+        # run_fn runs in the JobQueue's task and is cancelled here, so the
+        # "stopped" the store reports is true.
+        _cancel_scheduled_runs(instance_id)
 
         bucket = instances
         if application is not None:
@@ -646,6 +739,7 @@ async def _run_continuous_routine(
         pass
 
 
+@_stoppable_job
 async def _interval_job_callback(context: CallbackContext) -> None:
     """Job callback for interval-scheduled one-shot routines. Sends message each run."""
     data = context.job.data or {}
@@ -726,6 +820,7 @@ async def _interval_job_callback(context: CallbackContext) -> None:
     )
 
 
+@_stoppable_job
 async def _oneshot_job_callback(context: CallbackContext) -> None:
     """Job callback for one-time runs."""
     data = context.job.data or {}
@@ -801,6 +896,7 @@ async def _oneshot_job_callback(context: CallbackContext) -> None:
         )
 
 
+@_stoppable_job
 async def _daily_job_callback(context: CallbackContext) -> None:
     """Job callback for daily-scheduled routines."""
     data = context.job.data or {}
