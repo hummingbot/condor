@@ -1,8 +1,9 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { Activity } from "lucide-react";
+import { Activity, Plus, Repeat } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { CreateStrategyDialog } from "@/components/agent/AgentStrategies";
 import { isLoopRun, liveControllerIds } from "@/components/agent/lab/runs";
 import { TickSpine } from "@/components/agent/lab/TickSpine";
 import { AgentFleet } from "@/components/agent/workspace/AgentFleet";
@@ -34,6 +35,8 @@ import {
   type AgentRunRow,
   type StrategyDetail,
 } from "@/lib/api";
+import { Button } from "@/components/ui/Button";
+import { EmptyState } from "@/components/ui/EmptyState";
 import { agentQuery } from "@/lib/queryClient";
 
 /**
@@ -106,6 +109,7 @@ export function AgentRunScreen({
   const navigate = useNavigate();
 
   const { url, set: setParams } = adapter;
+  const [creatingLoop, setCreatingLoop] = useState(false);
 
   // One tab at a time on both hosts; only where it is written differs.
   const section: PaneSection = isPane ? paneSection : pageSection(url.open);
@@ -458,9 +462,20 @@ export function AgentRunScreen({
         }`}
       >
         {!sslug ? (
-          <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">
-            This agent has no loops yet, so there is nothing to look at.
-          </p>
+          // Was a dead end ("nothing to look at") with no way forward from
+          // here (UX review). Same dialog the Knowledge panel's loop list uses.
+          <EmptyState
+            compact
+            icon={<Repeat />}
+            title="No loops yet"
+            description="A loop is a strategy this agent runs on a timer: each tick it reads the market and decides what to do."
+            action={
+              <Button variant="primary" size="sm" onClick={() => setCreatingLoop(true)}>
+                <Plus className="h-3.5 w-3.5" />
+                Start a loop
+              </Button>
+            }
+          />
         ) : section === "now" ? (
           <div className={isPane ? "p-4" : "mx-auto w-full max-w-6xl p-6"}>
             {nowBody}
@@ -475,6 +490,13 @@ export function AgentRunScreen({
       </div>
 
       {tickOverlay}
+
+      <CreateStrategyDialog
+        agentSlug={slug}
+        open={creatingLoop}
+        onClose={() => setCreatingLoop(false)}
+        onCreated={(strategySlug) => setParams({ strategy: strategySlug })}
+      />
     </div>
   );
 }

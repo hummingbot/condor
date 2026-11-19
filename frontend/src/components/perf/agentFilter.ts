@@ -45,12 +45,14 @@ import type { PerfLeaf } from "@/lib/perf-tree";
  *
  * The **values** are frozen — they are in every saved filter URL — so `OUTSIDE`
  * keeps the name of the value it holds. The label above it does not: it stopped
- * naming a culprit when the ledger stopped being able to name one (READ-365).
+ * naming a culprit when the ledger stopped being able to name one (READ-365),
+ * and the UX review swapped the ledger jargon for plain words that still claim
+ * no cause: "Owner unknown" and "Before tracking began".
  */
 export const OUTSIDE = " outside";
-export const OUTSIDE_LABEL = "No record found";
+export const OUTSIDE_LABEL = "Owner unknown";
 export const BEFORE_LEDGER = " pre";
-export const BEFORE_LEDGER_LABEL = "Before the ledger";
+export const BEFORE_LEDGER_LABEL = "Before tracking began";
 
 /**
  * Which bucket an unowned leaf falls in: the cut is one timestamp.

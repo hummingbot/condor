@@ -4,7 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { candleChannelKey, candleStore } from "@/lib/candle-store";
 import { formatCompactVolume } from "@/lib/formatters";
-import { changeColumnLabel, changeWindowTitle, formatChange } from "@/lib/marketChange";
+import { changeLabel, changeWindowTitle, formatChange } from "@/lib/marketChange";
 import { useTickers } from "@/components/market/useTickers";
 
 interface PriceTickerProps {
@@ -182,7 +182,7 @@ export function PriceTicker({
               width on saying nothing. */}
           {ticker.change_pct != null && (
             <Stat
-              label={changeColumnLabel(windowS)}
+              label={changeLabel(windowS)}
               title={changeWindowTitle(windowS)}
               valueClass={
                 ticker.change_pct >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]"

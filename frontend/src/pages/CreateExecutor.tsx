@@ -83,6 +83,25 @@ const TYPE_LABELS: Record<ExecutorType, string> = {
   lp: "LP Executor",
 };
 
+// One line under the type tabs, so a first-time trader knows what each one is
+// before choosing (UX review: the tabs had no explanation at all).
+const TYPE_HINTS: Record<ExecutorType, string> = {
+  order: "Buy or sell once, at the market or at a price you set.",
+  position: "Open a position that closes itself at your take-profit or stop-loss.",
+  grid: "A ladder of buy and sell orders across a price range.",
+  dca: "Split an entry into several orders at different prices.",
+  lp: "Provide liquidity to a pool within a price range.",
+};
+
+// The success dialog's title, in the same plain words as the button.
+const DONE_LABELS: Record<ExecutorType, string> = {
+  grid: "Grid started",
+  position: "Position opened",
+  order: "Order placed",
+  dca: "DCA started",
+  lp: "Liquidity added",
+};
+
 // What the submit button says. Plain verbs rather than "Create … Executor"
 // (UX review): shorter, so the button stays on one line beside the chat
 // bubble, and it names what happens rather than the machinery behind it.
@@ -915,6 +934,9 @@ export function CreateExecutor() {
                     </button>
                   ))}
                 </div>
+                <p className="px-3 pb-2 pt-1.5 text-[11px] leading-snug text-[var(--color-text-muted)]">
+                  {TYPE_HINTS[executorType]}
+                </p>
               </div>
 
               {/* Everything the venue's credentials gate — the config form and
@@ -985,7 +1007,7 @@ export function CreateExecutor() {
       {successInfo && (
         <ExecutorSuccessModal
           executorId={successInfo.id}
-          title={`${TYPE_LABELS[successInfo.type]} Created`}
+          title={DONE_LABELS[successInfo.type]}
           subtitle={`Successfully deployed on ${successInfo.connector}`}
           details={
             <>

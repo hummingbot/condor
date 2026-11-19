@@ -220,7 +220,7 @@ export function AgentStrategies({
 
 // ── Create Strategy Dialog ──
 
-function CreateStrategyDialog({
+export function CreateStrategyDialog({
   agentSlug,
   open,
   onCreated,

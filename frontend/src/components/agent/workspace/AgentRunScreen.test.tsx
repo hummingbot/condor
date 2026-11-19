@@ -392,7 +392,11 @@ describe("the page's tabs", () => {
     getAgentRuns.mockResolvedValue([]);
     await render("/");
     expect(container.querySelector("[data-pane-tabs]")).toBeNull();
-    expect(container.textContent).toContain("no loops yet");
+    expect(container.textContent).toContain("No loops yet");
+    // Not a dead end: the empty state offers the way forward.
+    expect(
+      [...container.querySelectorAll("button")].some((b) => b.textContent?.includes("Start a loop")),
+    ).toBe(true);
   });
 });
 

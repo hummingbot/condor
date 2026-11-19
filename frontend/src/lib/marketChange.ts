@@ -16,11 +16,31 @@ const HOUR_S = 3600;
 const TOLERANCE_H = 0.5;
 
 export function changeColumnLabel(windowS: number | null): string {
-  if (windowS == null || !Number.isFinite(windowS) || windowS <= 0) return "Δ";
+  const w = changeWindow(windowS);
+  return w ? `${w} Δ` : "Δ";
+}
+
+/**
+ * The same window in words, for a header with room to say "change" (the trade
+ * page's ticker). The UX review read "140h Δ" as noise; "6d change" is the
+ * same measured window, said the way a trader would.
+ */
+export function changeLabel(windowS: number | null): string {
+  const w = changeWindow(windowS);
+  return w ? `${w} change` : "Change";
+}
+
+/**
+ * The measured window, short: "24h" when it is 24h, whole days from 48h up
+ * (hourly snapshots make "140h" read as false precision), hours, then minutes.
+ */
+function changeWindow(windowS: number | null): string | null {
+  if (windowS == null || !Number.isFinite(windowS) || windowS <= 0) return null;
   const hours = windowS / HOUR_S;
-  if (Math.abs(hours - 24) <= TOLERANCE_H) return "24h Δ";
-  if (hours >= 1) return `${Math.round(hours)}h Δ`;
-  return `${Math.max(1, Math.round(windowS / 60))}m Δ`;
+  if (Math.abs(hours - 24) <= TOLERANCE_H) return "24h";
+  if (hours >= 48) return `${Math.round(hours / 24)}d`;
+  if (hours >= 1) return `${Math.round(hours)}h`;
+  return `${Math.max(1, Math.round(windowS / 60))}m`;
 }
 
 /** The exact age, for the header's and each cell's tooltip. */
