@@ -2352,7 +2352,7 @@ export function PerfBrowser({
     return {
       // The same label the route entry uses, so the cache's half of this screen
       // and the reader's half render as one screen rather than two.
-      label: "Activity",
+      label: "Bots",
       subject,
       onScreen: {
         population,
