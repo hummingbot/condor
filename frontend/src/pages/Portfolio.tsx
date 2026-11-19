@@ -29,6 +29,7 @@ import {
 } from "@/lib/api";
 import { formatCurrency, formatCurrencyPnl, formatCurrencyVolume, isExecutorActive } from "@/lib/formatters";
 import { agentsQuery, EXECUTORS_REFETCH_MS, executorsQuery } from "@/lib/queryClient";
+import { portfolioChange } from "@/lib/portfolioChange";
 import { getThemeColors } from "@/lib/theme-colors";
 
 // ── Formatters ──
@@ -111,6 +112,7 @@ function DashboardStrip({
   totalTokens,
   connectorCount,
   portfolioPnl,
+  portfolioFlows,
   botCount,
   controllerCount,
   botPnl,
@@ -127,6 +129,8 @@ function DashboardStrip({
   totalTokens: number;
   connectorCount: number;
   portfolioPnl: number | null;
+  /** Deposits minus withdrawals over the window: change in value the P&L leaves out. */
+  portfolioFlows: number;
   botCount: number;
   controllerCount: number;
   botPnl: number;
@@ -150,7 +154,12 @@ function DashboardStrip({
           label="Portfolio"
           mainValue={formatCurrency(convertFromUsd(totalUsd), currencySymbol)}
           pnl={portfolioPnl != null ? convertFromUsd(portfolioPnl) : undefined}
-          details={`${totalTokens} assets · ${connectorCount} connector${connectorCount !== 1 ? "s" : ""}`}
+          details={
+            // Money moved in or out is said beside the P&L, never inside it.
+            Math.abs(portfolioFlows) >= 0.01
+              ? `${portfolioFlows > 0 ? "Deposits" : "Withdrawals"} ${formatCurrency(convertFromUsd(Math.abs(portfolioFlows)), currencySymbol)} · not counted as P&L`
+              : `${totalTokens} assets · ${connectorCount} connector${connectorCount !== 1 ? "s" : ""}`
+          }
           currencySymbol={currencySymbol}
         />
 
@@ -930,10 +939,10 @@ export function Portfolio() {
 
   // Compute portfolio PnL from history (follows period selector)
   const historyPoints = periodHistory?.points ?? [];
-  const portfolioPnl =
-    historyPoints.length >= 2
-      ? historyPoints[historyPoints.length - 1].total_usd - historyPoints[0].total_usd
-      : null;
+  // Market P&L only: a deposit is not a gain (lib/portfolioChange.ts).
+  const periodChange = portfolioChange(historyPoints);
+  const portfolioPnl = periodChange?.pnl ?? null;
+  const portfolioFlows = periodChange?.flows ?? 0;
 
   // Compute aggregate stats
   const totalTokens = connectors.reduce((s, c) => s + c.balances.length, 0);
@@ -965,6 +974,7 @@ export function Portfolio() {
         totalTokens={totalTokens}
         connectorCount={connectors.length}
         portfolioPnl={portfolioPnl}
+        portfolioFlows={portfolioFlows}
         botCount={botsList.length}
         controllerCount={controllerCount}
         botPnl={botPnl}

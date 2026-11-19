@@ -5,6 +5,7 @@ import { useNavigate } from "react-router-dom";
 
 import { useRates } from "@/hooks/useRates";
 import { api } from "@/lib/api";
+import { portfolioChange } from "@/lib/portfolioChange";
 import {
   formatConnectorName,
   formatCurrency,
@@ -208,11 +209,9 @@ export function DockPortfolio({ server }: { server: string }) {
    * a total on its own.
    */
   const change = useMemo(() => {
-    const points = history?.points ?? [];
-    if (points.length < 2) return null;
-    const first = points[0].total_usd;
-    const last = points[points.length - 1].total_usd;
-    return { abs: last - first, pct: first > 0 ? ((last - first) / first) * 100 : null };
+    // Market P&L, not the change in value: a deposit is not a gain.
+    const c = portfolioChange(history?.points ?? []);
+    return c ? { abs: c.pnl, pct: c.pct } : null;
   }, [history]);
 
   const footer = (

@@ -194,6 +194,7 @@ async def get_portfolio_history(
         points.append(PortfolioHistoryPoint(timestamp=ts, total_usd=float(total)))
 
     points.sort(key=lambda p: p.timestamp)
+    _apply_market_pnl(entries, keyed, points)
 
     top_tokens: list[str] = []
     if breakdown and points:
@@ -304,6 +305,85 @@ def _build_token_breakdown(
     if "Other" in {t for p in points for t in p.tokens} and "Other" not in top_tokens:
         top_tokens.append("Other")
     return top_tokens
+
+
+def _extract_positions(
+    data: object,
+) -> dict[str, tuple[float | None, float | None, float]]:
+    """Per balance row in a snapshot: ``(units, price, value)``, keyed by
+    ``account:connector:token``. Units or price is ``None`` when the row does
+    not carry it."""
+    rows: dict[str, tuple[float | None, float | None, float]] = {}
+    if not isinstance(data, dict):
+        return rows
+    for account, val in data.items():
+        if not isinstance(val, dict):
+            continue
+        for connector, inner in val.items():
+            if not isinstance(inner, list):
+                continue
+            for item in inner:
+                if not isinstance(item, dict):
+                    continue
+                token = item.get("token", item.get("asset", ""))
+                if not token:
+                    continue
+                value = balance_value(item)
+                units = _as_float(item.get("units", item.get("total_balance")))
+                price = _as_float(item.get("price"))
+                if price is None and units:
+                    price = value / units
+                rows[f"{account}:{connector}:{token}"] = (units, price, value)
+    return rows
+
+
+def _as_float(val: object) -> float | None:
+    try:
+        return None if val is None else float(val)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _apply_market_pnl(
+    entries: list[tuple[float, Any]],
+    keyed: bool,
+    points: list[PortfolioHistoryPoint],
+) -> None:
+    """Set each point's ``pnl_usd``: market P&L accumulated since the first.
+
+    Between two snapshots a holding earns ``units_before × (price_now −
+    price_before)``. A deposit or withdrawal changes the units, not the price,
+    so it never lands here — which is the point: putting $200 in is not a
+    $200 gain. Swaps trade value for equal value at the snapshot's prices and
+    so add nothing either.
+
+    A row with no units (older payloads carry only ``value``) cannot be split
+    into price and quantity, so its whole value change counts, as it did
+    before. A row missing from a snapshot is held at its last known state,
+    like the totals' forward-fill.
+    """
+    pnl_at: dict[float, float] = {}
+    held: dict[str, tuple[float | None, float | None, float]] = {}
+    pnl = 0.0
+    for ts, snapshot in entries:
+        rows = _extract_positions(_snapshot_state(snapshot, keyed))
+        if not rows:
+            pnl_at[ts] = pnl
+            continue
+        for key, (units, price, value) in rows.items():
+            before = held.get(key)
+            if before is not None:
+                b_units, b_price, b_value = before
+                if b_units is None or units is None:
+                    pnl += value - b_value
+                elif b_price is not None and price is not None:
+                    pnl += b_units * (price - b_price)
+            held[key] = (units, price, value)
+        pnl_at[ts] = pnl
+
+    base = pnl_at.get(points[0].timestamp, 0.0) if points else 0.0
+    for point in points:
+        point.pnl_usd = pnl_at.get(point.timestamp, base) - base
 
 
 def _parse_timestamp(val: object) -> float:

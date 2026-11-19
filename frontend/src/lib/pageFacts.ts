@@ -4,6 +4,7 @@ import { runLabel } from "@/components/agent/lab/runs";
 import { poolLabel } from "@/components/dex/format";
 import { readLpPosition } from "@/components/dex/lp-position";
 import { getDisplayCurrency } from "@/hooks/useDisplayCurrency";
+import { portfolioChange } from "@/lib/portfolioChange";
 import type {
   AgentBrain,
   AgentDetail,
@@ -544,8 +545,8 @@ const ROUTES: {
       const points = history?.points ?? [];
       const first = points[0];
       const last = points[points.length - 1];
-      const change =
-        points.length >= 2 ? last.total_usd - first.total_usd : null;
+      // Market P&L, deposits and withdrawals left out (lib/portfolioChange.ts).
+      const change = portfolioChange(points)?.pnl ?? null;
       const held = fresh<ConsolidatedPositionsResponse>(qc, [
         "consolidated-positions",
       ]);

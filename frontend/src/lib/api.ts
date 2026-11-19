@@ -574,6 +574,8 @@ export interface PortfolioHistoryPoint {
   timestamp: number;
   total_usd: number;
   tokens?: Record<string, number>;
+  /** Market P&L since the window's first point, deposits and withdrawals left out. */
+  pnl_usd?: number;
 }
 
 export interface PortfolioHistoryResponse {

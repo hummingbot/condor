@@ -82,6 +82,10 @@ class PortfolioHistoryPoint(BaseModel):
     timestamp: float
     total_usd: float = 0.0
     tokens: dict[str, float] = {}
+    # Cumulative market P&L since the first point: what price moves did to the
+    # holdings, with deposits and withdrawals left out. ``total_usd`` minus
+    # this, against the first point, is what moved in or out.
+    pnl_usd: float = 0.0
 
 
 class PortfolioHistoryResponse(BaseModel):
