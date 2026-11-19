@@ -35,6 +35,14 @@ from condor.agents.shutdown import (
 from condor.agents.strategy import Strategy
 
 
+async def _no_bots():
+    """Stub bot pass: these tests model sessions that deployed no bot.
+
+    The bot pass itself is covered in tests/test_engine_stop_bots.py.
+    """
+    return None
+
+
 def _make_strategy(tmp_path, monkeypatch) -> Strategy:
     monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     s = Strategy(agent_slug="acme", name="Scalper")
@@ -403,6 +411,7 @@ def test_run_shutdown_idempotent(monkeypatch):
         notifications.append(msg)
 
     stub = SimpleNamespace(
+        _stop_bots_on_stop=_no_bots,
         _shutting_down=False,
         _running=True,
         _paused=False,
@@ -459,6 +468,7 @@ def _winddown_stub(monkeypatch):
         events.append(("notify", msg))
 
     stub = SimpleNamespace(
+        _stop_bots_on_stop=_no_bots,
         _shutting_down=False,
         _shutdown_finished=None,
         _running=True,
