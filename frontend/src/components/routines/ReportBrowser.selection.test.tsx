@@ -25,10 +25,11 @@ const deleteReport = vi.fn();
 const runRoutine = vi.fn();
 const getRoutineInstance = vi.fn();
 const stopRoutineInstance = vi.fn();
+const getRoutines = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   api: {
-    getRoutines: () => Promise.resolve([routine("alpha_check")]),
+    getRoutines: (...a: unknown[]) => getRoutines(...a),
     getRoutineReports: (...a: unknown[]) => getRoutineReports(...a),
     getRoutineInstance: (...a: unknown[]) => getRoutineInstance(...a),
     stopRoutineInstance: (...a: unknown[]) => stopRoutineInstance(...a),
@@ -148,6 +149,8 @@ beforeEach(() => {
   getRoutineInstance.mockResolvedValue(null);
   stopRoutineInstance.mockReset();
   stopRoutineInstance.mockResolvedValue({ stopped: true });
+  getRoutines.mockReset();
+  getRoutines.mockResolvedValue([routine("alpha_check")]);
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -277,5 +280,84 @@ describe("ReportBrowser run status, with reports on file", () => {
 
     expect(stopRoutineInstance).toHaveBeenCalledWith("i1");
     expect(strip()).toContain("Could not stop the run: no such instance");
+  });
+});
+
+/**
+ * A run's outcome belongs to the routine that started it.
+ *
+ * The pane polls the run it started; the reader can move to another routine
+ * meanwhile. Tied to whichever routine was on screen when the run ended, a
+ * failure of alpha opened beta's Output view and captioned alpha's error
+ * under beta's name.
+ */
+describe("ReportBrowser run status, across a routine switch", () => {
+  const strip = () => container.querySelector("[data-status-strip]")?.textContent ?? null;
+  const instance = (status: RoutineInstance["status"], error?: string): RoutineInstance =>
+    ({
+      instance_id: "i9",
+      routine_name: "alpha_check",
+      config: {},
+      status,
+      source: "web",
+      run_count: 1,
+      created_at: 1,
+      last_run_at: 1,
+      last_result: null,
+      last_duration: null,
+      error,
+    }) as RoutineInstance;
+  /** What the 2 s completion poll does, without waiting two seconds. */
+  const pollRun = async () => {
+    await act(async () => {
+      await qc.invalidateQueries({ queryKey: ["routine-instance"] });
+    });
+    await settle();
+  };
+
+  beforeEach(() => {
+    getRoutines.mockResolvedValue([routine("alpha_check"), routine("beta_check")]);
+  });
+
+  it("keeps a failure of the routine left behind off the one on screen, and says it on return", async () => {
+    getRoutineInstance.mockResolvedValue(instance("running"));
+    await render();
+    expect(container.querySelector("h2")?.textContent).toBe("Alpha Check");
+
+    await click(titled("Run with current config"));
+    await settle();
+    expect(runRoutine.mock.calls[0][1]).toBe("alpha_check");
+
+    await click(titled("beta check"));
+    await settle();
+    expect(container.querySelector("h2")?.textContent).toBe("Beta Check");
+    // alpha's run in flight is not beta's either.
+    expect(strip()).toBeNull();
+
+    getRoutineInstance.mockResolvedValue(instance("failed", "KeyError: 'price'"));
+    await pollRun();
+
+    // beta is untouched: no strip, and still on its report rather than an
+    // Output view of alpha's run.
+    expect(strip()).toBeNull();
+    expect(frame()).toBe("b");
+    expect(container.textContent).not.toContain("KeyError");
+
+    await click(titled("alpha check"));
+    await settle();
+    expect(strip()).toContain("Last run failed: KeyError: 'price'");
+  });
+
+  it("still opens the output when the routine that failed is the one on screen", async () => {
+    getRoutineInstance.mockResolvedValue(instance("running"));
+    await render();
+    await click(titled("Run with current config"));
+    await settle();
+
+    getRoutineInstance.mockResolvedValue(instance("failed", "KeyError: 'price'\n  File x.py, line 3"));
+    await pollRun();
+
+    expect(strip()).toContain("Last run failed: KeyError: 'price'");
+    expect(frame()).toBeUndefined();
   });
 });

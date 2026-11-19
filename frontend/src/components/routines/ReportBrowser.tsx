@@ -376,7 +376,10 @@ export function ReportBrowser({
    * failed run and reads as its result; this is what the status strip under
    * the header points at instead (FU-08).
    */
-  const [failedRun, setFailedRun] = useState<RoutineInstance | null>(null);
+  const [failedRun, setFailedRun] = useState<{ run: RoutineInstance; routine: string } | null>(null);
+  // Shown only on the routine it happened on: a run of A that fails while the
+  // reader is on B is A's to report, and is still there when they return to A.
+  const failedHere = failedRun?.routine === activeSource ? failedRun.run : null;
   // Which running chip's Stop is armed — an id, as every armed action here is.
   const [confirmStop, setConfirmStop] = useState<string | null>(null);
 
@@ -399,7 +402,7 @@ export function ReportBrowser({
     if (clicked) return clicked;
     // The run this pane just watched fail is the one its strip points at —
     // shown from the polled copy, which the instance list may not hold yet.
-    if (failedRun && failedRun.routine_name === activeSource) return failedRun;
+    if (failedHere) return failedHere;
     return (
       [...forSource].sort(
         (a, b) =>
@@ -407,7 +410,7 @@ export function ReportBrowser({
           toMs(a.last_run_at ?? a.created_at),
       )[0] ?? null
     );
-  }, [instances, activeSource, initialInstanceId, failedRun]);
+  }, [instances, activeSource, initialInstanceId, failedHere]);
 
   // `last_result` on the list is truncated; the sections, tables and chart of a
   // run live behind its own route, so the view that shows them fetches it.
@@ -446,12 +449,23 @@ export function ReportBrowser({
     setConfigValues(buildConfigValues(effectiveRoutine));
   }, [effectiveRoutine, needsFields, fetchedFields]);
 
-  // Track running instance to poll for completion
-  const [pollingInstanceId, setPollingInstanceId] = useState<string | null>(null);
+  /**
+   * The run this pane started and is polling for completion — and the routine
+   * that started it.
+   *
+   * The reader can move to another routine while it runs, so what the run
+   * comes to belongs to its own routine, not to whichever one is on screen
+   * when it ends: tied to the active routine instead, a failure of A opened
+   * B's Output view and captioned A's error under B's name.
+   */
+  const [polling, setPolling] = useState<{ instanceId: string; routine: string } | null>(null);
+  const pollingInstanceId = polling?.instanceId ?? null;
   // A run this pane started and is still waiting on, when no chip says so
   // already: the instance list reaches the chips a poll later than the POST.
   const runInFlight =
-    !!pollingInstanceId && !sourceInstances.some((i) => i.instance_id === pollingInstanceId);
+    !!polling &&
+    polling.routine === activeSource &&
+    !sourceInstances.some((i) => i.instance_id === polling.instanceId);
 
   const { data: polledInstance } = useQuery({
     queryKey: ["routine-instance", pollingInstanceId],
@@ -460,18 +474,23 @@ export function ReportBrowser({
     refetchInterval: 2000,
   });
 
-  // When polled instance completes, refresh reports — and when it failed, say
-  // so where it cannot be missed: the strip, and the Output view it points at.
+  // When polled instance completes, refresh its routine's reports — and when
+  // it failed, say so where it cannot be missed: the strip, and the Output
+  // view it points at. Both only on the routine that started the run: a reader
+  // who has moved on is not pulled into another routine's output, and the
+  // failure waits in `failedRun` for them to come back to it.
   useEffect(() => {
-    if (polledInstance && polledInstance.status !== "running") {
-      setPollingInstanceId(null);
-      invalidateRoutineQueries(qc, activeSource);
-      if (polledInstance.status === "failed") {
-        setFailedRun(polledInstance);
-        setView("output");
-      }
+    if (!polling || !polledInstance || polledInstance.status === "running") return;
+    setPolling(null);
+    invalidateRoutineQueries(qc, polling.routine);
+    if (polledInstance.status === "failed") {
+      setFailedRun({ run: polledInstance, routine: polling.routine });
+      if (polling.routine === activeSource) setView("output");
     }
-  }, [polledInstance, activeSource, qc]);
+  }, [polledInstance, polling, activeSource, qc]);
+
+  /** The polled run, only while it is the routine on screen's. */
+  const polledHere = polling?.routine === activeSource ? polledInstance : undefined;
 
   const runMutation = useMutation({
     mutationFn: async () => {
@@ -489,20 +508,28 @@ export function ReportBrowser({
         attributeTo: runContext?.agentSlug,
       });
     },
-    // A new run supersedes what the last one said.
-    onMutate: () => setFailedRun(null),
-    onSuccess: (data) => {
-      setPollingInstanceId(data.instance_id);
+    // A new run supersedes what the last one said. The routine is captured
+    // here, at the click, because the reader may have moved on by the time
+    // the POST answers.
+    onMutate: () => {
+      const routine = activeSource;
+      setFailedRun((f) => (f?.routine === routine ? null : f));
+      return { routine };
+    },
+    onSuccess: (data, _vars, context) => {
+      setPolling({ instanceId: data.instance_id, routine: context.routine });
       qc.invalidateQueries({ queryKey: ["routine-instances"] });
       setShowConfigPanel(false);
     },
   });
   // A failure belongs to the routine it happened on: moving to another one
-  // must not carry the message along under the new name.
+  // must not carry the message along under the new name. A *watched* failure
+  // is kept rather than dropped — `failedHere` shows it only on its own
+  // routine — so a run that failed while the reader was elsewhere is still
+  // said when they come back to it, until that routine's next run.
   const { reset: resetRun } = runMutation;
   useEffect(() => {
     resetRun();
-    setFailedRun(null);
     setConfirmStop(null);
   }, [activeSource, resetRun]);
 
@@ -966,12 +993,12 @@ export function ReportBrowser({
             outside the collapsible panels and above the report, so it is
             visible whatever is open and however many reports are on file
             (CORR-097 for Schedule; FU-08 for Run, Stop and a failed run). */}
-        {(runMutation.isError || scheduleMutation.isError || stopMutation.isError || failedRun || runInFlight) && (
+        {(runMutation.isError || scheduleMutation.isError || stopMutation.isError || failedHere || runInFlight) && (
           <div
             data-status-strip
             role="status"
             className={`space-y-1 border-b border-[var(--color-border)] px-4 py-2 ${
-              runMutation.isError || scheduleMutation.isError || stopMutation.isError || failedRun
+              runMutation.isError || scheduleMutation.isError || stopMutation.isError || failedHere
                 ? "bg-[var(--color-red)]/5"
                 : ""
             }`}
@@ -991,11 +1018,11 @@ export function ReportBrowser({
                 Could not stop the run: {(stopMutation.error as Error).message}
               </p>
             )}
-            {failedRun && (
+            {failedHere && (
               <p className="flex items-center gap-2 text-xs text-[var(--color-red)]">
                 <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
                 <span className="min-w-0 truncate">
-                  Last run failed{failedRun.error ? `: ${failedRun.error.split("\n")[0]}` : ""}
+                  Last run failed{failedHere.error ? `: ${failedHere.error.split("\n")[0]}` : ""}
                 </span>
                 {view !== "output" && (
                   <button
@@ -1145,7 +1172,7 @@ export function ReportBrowser({
           ) : !selectedReport ? (
             // No reports — show error if failed, otherwise prompt to run
             <div className="flex h-full flex-col items-center justify-center text-center px-8">
-              {(polledInstance?.status === "failed" || latestFailedInstance) ? (
+              {(polledHere?.status === "failed" || latestFailedInstance) ? (
                 <>
                   <div className="w-full max-w-lg rounded-lg border border-[var(--color-red)]/30 bg-[var(--color-red)]/5 p-5">
                     <div className="flex items-center gap-2 mb-3">
@@ -1153,7 +1180,7 @@ export function ReportBrowser({
                       <span className="text-sm font-semibold text-[var(--color-red)]">Routine Failed</span>
                     </div>
                     <pre className="whitespace-pre-wrap break-words text-left font-mono text-xs text-[var(--color-text-muted)] bg-[var(--color-surface)] rounded p-3 max-h-60 overflow-y-auto">
-                      {(polledInstance?.status === "failed" ? polledInstance.error : latestFailedInstance?.error) || "Unknown error"}
+                      {(polledHere?.status === "failed" ? polledHere.error : latestFailedInstance?.error) || "Unknown error"}
                     </pre>
                     {activeRoutine && runServer && (
                       <button
