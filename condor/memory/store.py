@@ -118,15 +118,38 @@ def _trim_audit(audit_file: Path, cap: int | None = None) -> None:
 
 SNIPPET_CHARS = 200
 
-_TERM = re.compile(r"[a-z0-9]+")
+# A term is a run of Unicode letters or digits — not ``[a-z0-9]``, which
+# dropped every other script: "风险" tokenized to nothing and, read as "no
+# query", matched everything. Underscore still splits ("routine_cookbook" is
+# found by "cookbook"), as it did when only ASCII was kept.
+_TERM = re.compile(r"[^\W_]+")
+# Scripts written without spaces between words (Thai, CJK ideographs, kana,
+# Hangul syllables): a "word" there is a whole clause, so their terms match
+# anywhere inside one rather than only at its start.
+_UNSPACED = re.compile(
+    "[\u0e00-\u0e7f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff"
+    "\uac00-\ud7af\uf900-\ufaff]"
+)
 
 
 def query_terms(query: str | None) -> list[str]:
-    """The distinct lowercase alphanumeric terms of a query, in order."""
+    """The distinct lowercase letter/digit terms of a query, in order."""
     return list(dict.fromkeys(_TERM.findall((query or "").lower())))
 
 
+def is_blank_query(query: str | None) -> bool:
+    """True for a query that asks for everything: missing or whitespace only.
+
+    Distinct from a query that yields no :func:`query_terms` ("—", "!!!"):
+    that one asked for something, so it must match nothing rather than
+    everything and push the real hit past the result limit.
+    """
+    return not (query or "").strip()
+
+
 def _starts_a_word(term: str, words: list[str]) -> bool:
+    if _UNSPACED.search(term):
+        return any(term in word for word in words)
     return any(word.startswith(term) for word in words)
 
 
@@ -141,7 +164,9 @@ def match_score(
 
     A term matches a word it *starts* ("binan" finds "binance"), not any
     substring: split queries produce short terms, and "re" from "re-centre"
-    would otherwise match every "whenever" and "already".
+    would otherwise match every "whenever" and "already". The exception is a
+    term in a script written without spaces, where a "word" is a whole clause:
+    "风险" matches anywhere in "控制风险管理".
     """
     fields = [
         (_TERM.findall((text or "").lower()), weight)
@@ -165,7 +190,17 @@ def snippet(body: str, terms: list[str], width: int = SNIPPET_CHARS) -> str:
     if len(text) <= width:
         return text
     lowered = text.lower()
-    found = [re.search(rf"(?<![a-z0-9]){re.escape(term)}", lowered) for term in terms]
+    found = [
+        re.search(
+            (
+                re.escape(term)
+                if _UNSPACED.search(term)
+                else rf"(?<![^\W_]){re.escape(term)}"
+            ),
+            lowered,
+        )
+        for term in terms
+    ]
     positions = [match.start() for match in found if match]
     start = max(min(positions) - width // 4, 0) if positions else 0
     start = min(start, len(text) - width)
@@ -264,13 +299,15 @@ class MemoryStore:
         nothing unless that exact phrase was stored, and the agent concluded
         there was no memory (ST-12). Ranked by how many terms matched, then by
         where (name > description > body), then newest first: the cut at
-        ``limit`` used to fall on the newest memories. An empty query lists
-        everything, newest first.
+        ``limit`` used to fall on the newest memories. A blank query lists
+        everything, newest first; a non-blank one with no letters or digits
+        matches nothing.
 
         Hits carry a ~200-character ``snippet``, not the body — :meth:`read`
         is how a caller pays for the one it wants.
         """
         terms = query_terms(query)
+        everything = is_blank_query(query)
         ranked = []
         # Oldest-first from _iter_memories; reversed so the stable sort below
         # leaves ties newest-first.
@@ -278,7 +315,7 @@ class MemoryStore:
             name = meta.get("name", "")
             description = meta.get("description", "")
             score = match_score(terms, ((name, 3), (description, 2), (body, 1)))
-            if terms and score is None:
+            if not everything and score is None:
                 continue
             ranked.append(
                 (

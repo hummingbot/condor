@@ -88,6 +88,7 @@ from .store import (
     _atomic_write,
     _slugify,
     _utcnow,
+    is_blank_query,
     match_score,
     query_terms,
     snippet,
@@ -580,6 +581,7 @@ class SkillStore:
         :meth:`read` is how a caller pays for the playbook it picked.
         """
         terms = query_terms(query)
+        everything = is_blank_query(query)
         ranked = []
         for _slug, meta, body, _shared, _stock in self._iter_skills():
             name = meta.get("name", "")
@@ -588,7 +590,7 @@ class SkillStore:
             score = match_score(
                 terms, ((name, 4), (when_to_use, 3), (description, 2), (body, 1))
             )
-            if terms and score is None:
+            if not everything and score is None:
                 continue
             hit = {
                 "name": name,

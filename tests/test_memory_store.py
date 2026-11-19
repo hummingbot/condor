@@ -382,3 +382,40 @@ def test_the_mcp_tool_defaults_to_ten_ranked_hits_with_a_total(
         memory_tool.manage_memory("search", query="binance", max_entries=12)
     )
     assert len(wide["results"]) == 12
+
+
+# ── Non-ASCII queries ──
+
+
+def test_search_finds_cjk_terms_inside_unspaced_text(memory_root):
+    s = MemoryStore(user_id=42)
+    for n in range(12):
+        s.write(f"Filler {n}", "Unrelated note about fees.", "Filler")
+    s.write("Risk rule", "每笔交易都要做好风险管理。", "交易风险上限")
+
+    hits, total = s.search_with_total("风险", limit=10)
+
+    # "风险" used to tokenize to nothing, match all 13, and the newest
+    # fillers pushed the one real hit past the limit.
+    assert [h["name"] for h in hits] == ["risk_rule"]
+    assert total == 1
+    assert "风险" in hits[0]["snippet"]
+
+
+def test_search_tokenizes_accented_latin_words_whole(memory_root):
+    s = MemoryStore(user_id=42)
+    s.write("Venue", "Preferir a corretora de São Paulo.", "Corretora")
+    s.write("Other", "Paulo prefers Binance.", "Other note")
+
+    # "são" is one term, not "s" + "o" (which would hit almost everything).
+    assert [h["name"] for h in s.search("são")] == ["venue"]
+
+
+def test_a_nonblank_query_with_no_terms_matches_nothing(memory_root):
+    s = MemoryStore(user_id=42)
+    s.write("One", "Body one.", "First")
+    s.write("Two", "Body two.", "Second")
+
+    assert s.search_with_total("— !!!") == ([], 0)
+    # A blank query still lists everything.
+    assert len(s.search("   ")) == 2

@@ -664,3 +664,23 @@ def test_search_limit_cuts_after_ranking(project_root):
 
     # Last in library order, first by rank: the old loop stopped at filler_0.
     assert [h["name"] for h in hits] == ["zz_best"]
+
+
+# ── Non-ASCII queries ──
+
+
+def test_search_finds_cjk_terms_and_a_termless_query_finds_nothing(project_root):
+    for n in range(5):
+        _write_skill(project_root, None, f"filler_{n}", when_to_use="filler alpha")
+    _write_skill(
+        project_root,
+        None,
+        "risk_playbook",
+        when_to_use="当仓位的风险管理超出上限时",
+        body="先减仓，再复盘风险。",
+    )
+    s = SkillStore()
+
+    assert [h["name"] for h in s.search("风险", limit=3)] == ["risk_playbook"]
+    assert s.search("—") == []
+    assert len(s.search("  ")) == 6
