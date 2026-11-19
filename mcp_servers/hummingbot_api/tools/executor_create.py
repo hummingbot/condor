@@ -267,25 +267,92 @@ def _require_positive(name: str, value: Any, unit: str) -> None:
         raise ValueError(f"{name} must be greater than 0 ({unit}), got {value!r}")
 
 
-def _require_stop_loss_fraction(value: float | None) -> None:
-    """Refuse a stop-loss that is not a fraction strictly between 0 and 1.
+def _stop_loss_problem(value: Any) -> str:
+    """Why ``value`` is not a usable stop-loss fraction, or ``""`` if it is one.
 
     ``stop_loss=2`` meant as 2% is read as 200% — a stop that can never trigger —
     and was accepted without a word.
     """
     if value is None:
-        return
-    if isinstance(value, bool) or not (0 < value < 1):
-        hint = (
-            f" For a {value:g}% stop pass {value / 100:g}."
-            if not isinstance(value, bool) and 1 <= value <= 100
-            else ""
-        )
-        raise ValueError(
-            "stop_loss is a decimal FRACTION of the entry price, strictly between "
-            f"0 and 1 (0.02 = 2%), got {value!r}. A value of 1 or more is a stop "
-            f"of 100% or more, which never triggers.{hint}"
-        )
+        return ""
+    number: float | None = None
+    if not isinstance(value, bool):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            number = None
+    if number is not None and 0 < number < 1:
+        return ""
+    hint = (
+        f" For a {number:g}% stop pass {number / 100:g}."
+        if number is not None and 1 <= number <= 100
+        else ""
+    )
+    return (
+        "stop_loss is a decimal FRACTION of the entry price, strictly between "
+        f"0 and 1 (0.02 = 2%), got {value!r}. A value of 1 or more is a stop "
+        f"of 100% or more, which never triggers.{hint}"
+    )
+
+
+def _require_stop_loss_fraction(value: float | None) -> None:
+    """Refuse a stop-loss argument that is not a fraction strictly between 0 and 1."""
+    problem = _stop_loss_problem(value)
+    if problem:
+        raise ValueError(problem)
+
+
+#: Where a stop-loss can sit in a merged config: flat (DCA) or inside the
+#: triple barrier (position, and anything else that carries one).
+_STOP_LOSS_PATHS: tuple[tuple[str, ...], ...] = (
+    ("stop_loss",),
+    ("triple_barrier_config", "stop_loss"),
+)
+
+
+def _lookup(config: dict[str, Any], path: tuple[str, ...]) -> tuple[bool, Any]:
+    node: Any = config
+    for key in path:
+        if not isinstance(node, dict) or key not in node:
+            return False, None
+        node = node[key]
+    return True, node
+
+
+def effective_stop_loss_violation(
+    executor_type: str, config: dict[str, Any], merged_config: dict[str, Any]
+) -> str:
+    """Refuse a non-fraction stop-loss in the config that would actually be sent.
+
+    The argument check (:func:`_require_stop_loss_fraction`) only sees what the
+    call passed. A saved default merges underneath it, so an omitted ``stop_loss``
+    let a hand-edited or legacy ``stop_loss: 2`` on file reach the backend as a
+    200% stop. Judged after the merge, and the message says which source the bad
+    value came from so the caller knows whether to fix the call or the defaults.
+    """
+    for path in _STOP_LOSS_PATHS:
+        found, value = _lookup(merged_config, path)
+        if not found:
+            continue
+        problem = _stop_loss_problem(value)
+        if not problem:
+            continue
+        name = ".".join(path)
+        passed, _ = _lookup(config, path)
+        if passed:
+            source = f"{name} was passed in this call"
+            fix = "Pass a fraction instead."
+        else:
+            source = (
+                f"{name} comes from your saved defaults for {executor_type} "
+                "(not passed in this call)"
+            )
+            fix = (
+                "Pass stop_loss in this call to override it, and fix the saved "
+                "value with executor_defaults."
+            )
+        return f"{source}: {problem} {fix} Nothing was created."
+    return ""
 
 
 def usd(value: float) -> str:
@@ -521,6 +588,20 @@ async def create_executor(
         account,
         merged_config.get("trading_pair"),
     )
+
+    bad_stop = effective_stop_loss_violation(executor_type, config, merged_config)
+    if bad_stop:
+        # Refused before anything is fetched or sent: the backend accepts a stop
+        # of 100% or more and the position then has no working stop at all.
+        logger.info("create_%s refused, bad stop_loss: %s", executor_type, bad_stop)
+        return {
+            "action": "create",
+            "executor_type": executor_type,
+            "error": bad_stop,
+            "formatted_output": (
+                f"Error creating {executor_type}: {bad_stop}{defaults_note}"
+            ),
+        }
 
     missing = missing_required_setting(executor_type, merged_config)
     if missing:
