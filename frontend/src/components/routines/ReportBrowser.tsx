@@ -130,6 +130,12 @@ export function ReportBrowser({
   // 550px of pane cannot hold a 256px list and a report: hosted opens on the
   // 48px rail, the page keeps its list, and the toggle still works either way.
   const [isCompact, setIsCompact] = useState(hosted);
+  // The page on a phone: the list or the report, never both squeezed side by
+  // side (UX review, phone layout). Opens on the report when the URL named a
+  // routine, otherwise on the list. Ignored from md up.
+  const [phonePane, setPhonePane] = useState<"list" | "report">(
+    initialSource ? "report" : "list",
+  );
   // Typed into the sidebar's own box, which only the expanded list has — the
   // rail and the host-picked pane never narrow the list this way.
   const [search, setSearch] = useState("");
@@ -654,7 +660,11 @@ export function ReportBrowser({
           listed={filteredRoutines}
           instances={instances}
           activeSource={activeSource}
-          onSelect={selectSource}
+          onSelect={(name) => {
+            selectSource(name);
+            // A tap in the list, not the auto-pick on load, turns the page.
+            setPhonePane("report");
+          }}
           scope={effectiveScope}
           onScopeChange={changeScope}
           search={search}
@@ -665,11 +675,16 @@ export function ReportBrowser({
           stopping={stopMutation.isPending}
           listRef={sidebarRef}
           reportInfo={reportInfo}
+          phone={page ? (phonePane === "list" ? "full" : "hidden") : undefined}
         />
       )}
 
       {/* Main content */}
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div
+        className={`min-w-0 flex-1 flex-col ${
+          page && phonePane === "list" ? "hidden md:flex" : "flex"
+        }`}
+      >
         {/* Top bar — wraps rather than widening the column: at pane width the
             actions drop to a second row, and the routine's name keeps its own.
             Left to overflow it would lay the whole column out wider than the
@@ -687,6 +702,16 @@ export function ReportBrowser({
                 controls need. */}
             {!externalPicker && (
               <>
+                {page && (
+                  <button
+                    onClick={() => setPhonePane("list")}
+                    className="-ml-1 flex shrink-0 items-center gap-0.5 rounded p-1 text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] md:hidden"
+                    aria-label="Back to the routine list"
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                    Routines
+                  </button>
+                )}
                 {hasAgents && isCompact && (
                   <RoutinePicker
                     parts="scope"
@@ -740,7 +765,7 @@ export function ReportBrowser({
           <div className="flex flex-wrap items-center justify-end gap-1">
             {/* Run / Config actions — always show when routine exists */}
             {activeRoutine && runServer && (
-              <div className="flex items-center gap-1 mr-2">
+              <div className="mr-2 flex flex-wrap items-center gap-1">
                 <button
                   onClick={() => setShowSourceModal(true)}
                   className="flex items-center gap-1 rounded px-2 py-1 text-[10px] font-semibold text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"

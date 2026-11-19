@@ -87,7 +87,7 @@ function KpiCell({
   currencySymbol?: string;
 }) {
   return (
-    <div className="flex-1 px-5 py-3 min-w-0">
+    <div className="flex-1 bg-[var(--color-surface)] px-4 py-3 min-w-0 sm:px-5">
       <span className="text-[11px] uppercase tracking-wider font-medium text-[var(--color-text-muted)]">{label}</span>
       {/* Wraps instead of overflowing: in a narrow cell the PnL drops below the
           value rather than bleeding into the neighbouring KPI cell. */}
@@ -145,7 +145,10 @@ function DashboardStrip({
 
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
-      <div className="flex items-stretch divide-x divide-[var(--color-border)]">
+      {/* Two by two on a phone, where four tiles in a row overprinted each
+          other (UX review); one row from sm up. The 1px gap over the border
+          colour draws the grid lines that divide-x draws in the row. */}
+      <div className="grid grid-cols-2 gap-px bg-[var(--color-border)] sm:flex sm:items-stretch sm:gap-0 sm:divide-x sm:divide-[var(--color-border)]">
         <KpiCell
           label="Portfolio"
           mainValue={formatCurrency(convertFromUsd(totalUsd), currencySymbol)}
@@ -186,7 +189,7 @@ function DashboardStrip({
             Keys and Servers used to sit under it: setup links in the middle of
             the numbers, and the top bar now says which server (and whether
             its Gateway is up). Both live in Settings. */}
-        <div className="flex flex-col justify-center gap-1 px-2.5 py-2 shrink-0 w-[100px]">
+        <div className="col-span-2 flex flex-col justify-center gap-1 bg-[var(--color-surface)] px-2.5 py-2 shrink-0 sm:w-[100px]">
           <div className="flex gap-0.5 rounded-md border border-[var(--color-border)] p-0.5 bg-[var(--color-bg)] w-full justify-center">
             {TIME_PERIODS.map((p) => (
               <button

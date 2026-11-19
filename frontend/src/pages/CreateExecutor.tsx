@@ -667,9 +667,12 @@ export function CreateExecutor() {
   }
 
   return (
-    <div className="-m-6 flex h-[calc(100%+3rem)] flex-col">
+    // Below md the page stacks — chart, then the form, then the tables — and
+    // grows with its content so the shell scrolls it (UX review, phone layout).
+    // Side by side, each pane would be a sliver at 390px wide.
+    <div className="-m-6 flex flex-col md:h-[calc(100%+3rem)]">
       {/* Top Bar */}
-      <div className="flex items-center border-b border-[var(--color-border)] bg-[var(--color-surface)]">
+      <div className="flex flex-wrap items-center border-b border-[var(--color-border)] bg-[var(--color-surface)] md:flex-nowrap">
         {/* Back button */}
         <button
           onClick={() => navigate(-1)}
@@ -743,7 +746,7 @@ export function CreateExecutor() {
         </div>
 
         {/* Price ticker */}
-        <div className="flex flex-1 items-center px-4 py-2">
+        <div className="flex min-w-0 basis-full items-center overflow-x-auto border-t border-[var(--color-border)] px-4 py-2 md:flex-1 md:basis-auto md:border-t-0">
           <PriceTicker
             server={server}
             connector={connector}
@@ -754,7 +757,7 @@ export function CreateExecutor() {
         </div>
 
         {/* Interval + Range */}
-        <div className="flex items-center gap-3 border-l border-[var(--color-border)] px-4 py-2">
+        <div className="flex w-full flex-wrap items-center gap-3 border-t border-[var(--color-border)] px-4 py-2 md:w-auto md:flex-nowrap md:border-l md:border-t-0">
           <div className="flex overflow-hidden rounded-md border border-[var(--color-border)]">
             {INTERVALS.map((iv) => (
               <button
@@ -803,9 +806,10 @@ export function CreateExecutor() {
       )}
 
       {/* Main Area: Chart + Right Panel */}
-      <div className="flex min-h-0 flex-1">
-        {/* Chart + Bottom Pane */}
-        <div className="relative min-w-0 flex-1 flex flex-col">
+      <div className="flex min-h-0 flex-1 flex-col md:flex-row">
+        {/* Chart + Bottom Pane. On a phone this column dissolves (`contents`)
+            so its chart and tables can sit either side of the form. */}
+        <div className="contents md:relative md:flex md:min-w-0 md:flex-1 md:flex-col">
           {browserOpen && caps.hasOrderBook && (
             <MarketBrowser
               server={server}
@@ -817,7 +821,7 @@ export function CreateExecutor() {
               onClose={() => setBrowserOpen(false)}
             />
           )}
-          <div className="flex-1 min-h-0 overflow-hidden bg-[var(--color-surface)]">
+          <div className="order-1 h-[45vh] min-h-64 shrink-0 overflow-hidden bg-[var(--color-surface)] md:order-none md:h-auto md:min-h-0 md:flex-1">
             <TradeChart
               key={`${connector}:${pair}:${gridState.interval}`}
               server={server}
@@ -844,12 +848,15 @@ export function CreateExecutor() {
           </div>
           {/* Horizontal resize handle */}
           <div
-            className="group/hdrag relative h-1.5 shrink-0 cursor-row-resize border-y border-[var(--color-border)] bg-[var(--color-bg)] hover:bg-[var(--color-primary-fill)]/10 active:bg-[var(--color-primary-fill)]/20 transition-colors"
+            className="group/hdrag relative hidden h-1.5 shrink-0 cursor-row-resize md:block border-y border-[var(--color-border)] bg-[var(--color-bg)] hover:bg-[var(--color-primary-fill)]/10 active:bg-[var(--color-primary-fill)]/20 transition-colors"
             onMouseDown={startVDrag}
           >
             <div className="absolute inset-x-0 top-1/2 mx-auto h-px w-12 -translate-y-1/2 rounded bg-amber-400/60 group-hover/hdrag:bg-amber-400 transition-colors" />
           </div>
-          <div style={{ height: bottomPaneHeight }} className="shrink-0 overflow-hidden">
+          <div
+            style={{ "--pane-h": `${bottomPaneHeight}px` } as React.CSSProperties}
+            className="order-3 h-[28rem] shrink-0 overflow-hidden md:order-none md:h-[var(--pane-h)]"
+          >
             <TradeBottomPane
               executors={mainExecutors}
               positions={mainPositions}
@@ -878,14 +885,17 @@ export function CreateExecutor() {
 
         {/* Vertical resize handle */}
         <div
-          className="group/vdrag relative w-1.5 shrink-0 cursor-col-resize border-x border-[var(--color-border)] bg-[var(--color-bg)] hover:bg-[var(--color-primary-fill)]/10 active:bg-[var(--color-primary-fill)]/20 transition-colors"
+          className="group/vdrag relative hidden w-1.5 shrink-0 cursor-col-resize md:block border-x border-[var(--color-border)] bg-[var(--color-bg)] hover:bg-[var(--color-primary-fill)]/10 active:bg-[var(--color-primary-fill)]/20 transition-colors"
           onMouseDown={startHDrag}
         >
           <div className="absolute inset-y-0 left-1/2 my-auto h-12 w-px -translate-x-1/2 rounded bg-amber-400/60 group-hover/vdrag:bg-amber-400 transition-colors" />
         </div>
 
         {/* Right Panel */}
-        <div className="flex shrink-0 flex-col bg-[var(--color-surface)]" style={{ width: rightPanelWidth }}>
+        <div
+          style={{ "--panel-w": `${rightPanelWidth}px` } as React.CSSProperties}
+          className="order-2 flex min-h-[32rem] w-full shrink-0 flex-col border-y border-[var(--color-border)] bg-[var(--color-surface)] md:order-none md:min-h-0 md:w-[var(--panel-w)] md:border-y-0"
+        >
           {/* Panel Mode Toggle */}
           <div className="flex border-b border-[var(--color-border)]">
             <button
