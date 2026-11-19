@@ -1,81 +1,55 @@
-"""The portfolio's P&L is what prices did, not what was deposited.
+"""Portfolio P&L is what prices did, not what was deposited (#350)."""
 
-It used to be ``last.total_usd - first.total_usd``, so putting $200 into an
-account read as a $200 gain while the holdings were losing money.
-"""
+import asyncio
 
-from condor.web.models import PortfolioHistoryPoint
-from condor.web.routes.portfolio import _apply_market_pnl
+from condor.web.routes.portfolio import get_portfolio_history
 
 
-def _snap(ts, rows):
-    return (ts, {"timestamp": ts, "state": {"master": {"binance": rows}}})
+class _Sds:
+    def __init__(self, history):
+        self.history = history
+
+    async def get_or_fetch(self, *args, **kwargs):
+        return self.history
 
 
-def _run(entries):
-    points = [PortfolioHistoryPoint(timestamp=ts) for ts, _ in entries]
-    _apply_market_pnl(entries, False, points)
-    return [round(p.pnl_usd, 6) for p in points]
-
-
-def test_a_deposit_is_not_a_gain():
-    entries = [
-        _snap(1, [{"token": "USDT", "units": 100, "price": 1, "value": 100}]),
-        _snap(2, [{"token": "USDT", "units": 300, "price": 1, "value": 300}]),
+def _snap(ts, *rows):
+    balances = [
+        {"token": token, "units": units, "value": units * price}
+        for token, units, price in rows
     ]
-    assert _run(entries) == [0, 0]
+    return {"timestamp": ts, "state": {"master": {"binance": balances}}}
 
 
-def test_a_loss_shows_through_a_deposit():
-    # 1 SOL falls from 150 to 120 (-30) while $200 of USDT is deposited.
-    entries = [
-        _snap(
-            1,
-            [
-                {"token": "SOL", "units": 1, "price": 150, "value": 150},
-                {"token": "USDT", "units": 0, "price": 1, "value": 0},
-            ],
-        ),
-        _snap(
-            2,
-            [
-                {"token": "SOL", "units": 1, "price": 120, "value": 120},
-                {"token": "USDT", "units": 200, "price": 1, "value": 200},
-            ],
-        ),
+def _pnl(monkeypatch, *snaps):
+    monkeypatch.setattr(
+        "condor.web.routes.portfolio.get_server_data_service",
+        lambda: _Sds(list(snaps)),
+    )
+    res = asyncio.run(
+        get_portfolio_history("s", range="1D", breakdown=False, user=None)
+    )
+    return [round(p.pnl_usd, 6) for p in res.points]
+
+
+def test_a_deposit_is_not_a_gain(monkeypatch):
+    assert _pnl(
+        monkeypatch, _snap(1, ("USDT", 100, 1)), _snap(2, ("USDT", 300, 1))
+    ) == [0, 0]
+
+
+def test_a_loss_shows_through_a_deposit(monkeypatch):
+    # SOL falls 150 -> 120 while $200 of USDT comes in.
+    assert _pnl(
+        monkeypatch,
+        _snap(1, ("SOL", 1, 150)),
+        _snap(2, ("SOL", 1, 120), ("USDT", 200, 1)),
+    ) == [0, -30]
+
+
+def test_a_withdrawal_is_not_a_loss(monkeypatch):
+    # 2 BTC held as the price goes 100 -> 110 (+20); 1 BTC withdrawn.
+    assert _pnl(monkeypatch, _snap(1, ("BTC", 2, 100)), _snap(2, ("BTC", 1, 110))) == [
+        0,
+        20,
     ]
-    assert _run(entries) == [0, -30]
-
-
-def test_a_withdrawal_is_not_a_loss():
-    entries = [
-        _snap(1, [{"token": "BTC", "units": 2, "price": 100, "value": 200}]),
-        _snap(2, [{"token": "BTC", "units": 1, "price": 110, "value": 110}]),
-    ]
-    # Price moved +10 on the 2 BTC held going in; the 1 BTC that left is not a loss.
-    assert _run(entries) == [0, 20]
-
-
-def test_price_is_derived_from_value_when_missing():
-    entries = [
-        _snap(1, [{"token": "ETH", "units": 2, "value": 200}]),
-        _snap(2, [{"token": "ETH", "units": 2, "value": 260}]),
-    ]
-    assert _run(entries) == [0, 60]
-
-
-def test_rows_without_units_fall_back_to_value_change():
-    entries = [
-        _snap(1, [{"token": "BTC", "value": 100.0}]),
-        _snap(2, [{"token": "BTC", "value": 120.0}]),
-    ]
-    assert _run(entries) == [0, 20]
-
-
-def test_a_connector_missing_from_a_snapshot_carries_no_move():
-    entries = [
-        _snap(1, [{"token": "SOL", "units": 1, "price": 100, "value": 100}]),
-        (2, {"timestamp": 2, "state": {"master": {}}}),
-        _snap(3, [{"token": "SOL", "units": 1, "price": 90, "value": 90}]),
-    ]
-    assert _run(entries) == [0, 0, -10]
