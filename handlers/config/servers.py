@@ -546,8 +546,8 @@ def _build_add_server_message(server_data: dict, current_field: str) -> tuple:
         "name": {"label": "Name", "default": None},
         "host": {"label": "Host", "default": "localhost"},
         "port": {"label": "Port", "default": "8000"},
-        "username": {"label": "Username", "default": "admin"},
-        "password": {"label": "Password", "default": "admin"},
+        "username": {"label": "Username", "default": None},
+        "password": {"label": "Password", "default": None},
     }
 
     field_order = ["name", "host", "port", "username", "password"]
@@ -865,9 +865,10 @@ async def handle_add_server_callbacks(
             defaults = {
                 "host": "localhost",
                 "port": 8000,
-                "username": "admin",
-                "password": "admin",
             }
+            if field not in defaults:
+                await query.answer("❌ No default available for this field")
+                return
 
             server_data[field] = defaults[field]
             context.user_data["adding_server"] = server_data

@@ -26,13 +26,19 @@ class ServerConfig(BaseModel):
 
     name: str = Field(default="default")
     url: str = Field(default="http://localhost:8000")
-    username: str = Field(default="admin")
-    password: str = Field(default="admin")
+    username: str
+    password: str
 
     @field_validator("url", mode="before")
     def validate_url(cls, v):
         if not v.startswith(("http://", "https://")):
             raise ValueError("API URL must start with http:// or https://")
+        return v
+
+    @field_validator("username", "password", mode="before")
+    def validate_credentials(cls, v):
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("API username and password must be non-empty strings")
         return v
 
 
@@ -41,16 +47,45 @@ def _load_server_config() -> ServerConfig:
     if SERVER_CONFIG_PATH.exists():
         try:
             with open(SERVER_CONFIG_PATH) as f:
-                data = yaml.safe_load(f) or {}
+                data = yaml.safe_load(f)
+        except Exception as e:
+            raise ConfigurationError(
+                f"Failed to parse {SERVER_CONFIG_PATH}: {e}"
+            ) from e
+        if data is None:
+            data = {}
+        if not isinstance(data, dict):
+            raise ConfigurationError(
+                f"Failed to parse {SERVER_CONFIG_PATH}: expected a YAML mapping"
+            )
+        try:
             return ServerConfig(**data)
-        except Exception:
-            pass
+        except Exception as e:
+            raise ConfigurationError(
+                f"Invalid configuration in {SERVER_CONFIG_PATH}: {e}"
+            ) from e
+
+    username = (
+        os.getenv("HUMMINGBOT_API_USERNAME")
+        or os.getenv("HUMMINGBOT_USERNAME")
+        or ""
+    )
+    password = (
+        os.getenv("HUMMINGBOT_API_PASSWORD")
+        or os.getenv("HUMMINGBOT_PASSWORD")
+        or ""
+    )
+    if not username.strip() or not password.strip():
+        raise ConfigurationError(
+            f"Hummingbot API credentials are not configured: {SERVER_CONFIG_PATH} does not exist "
+            "and HUMMINGBOT_USERNAME/HUMMINGBOT_PASSWORD are not set"
+        )
 
     return ServerConfig(
         name=os.getenv("HUMMINGBOT_SERVER_NAME", "default"),
         url=os.getenv("HUMMINGBOT_API_URL", "http://localhost:8000"),
-        username=os.getenv("HUMMINGBOT_USERNAME", "admin"),
-        password=os.getenv("HUMMINGBOT_PASSWORD", "admin"),
+        username=username,
+        password=password,
     )
 
 
@@ -66,8 +101,9 @@ class Settings(BaseModel):
 
     # API Configuration
     api_url: str = Field(default="http://localhost:8000")
-    api_username: str = Field(default="admin")
-    api_password: str = Field(default="admin")
+    api_username: str = Field(default="")
+    api_password: str = Field(default="")
+    config_error: str = Field(default="")
     server_name: str = Field(default="default")
     default_account: str = Field(default="master_account")
 
@@ -127,6 +163,7 @@ class Settings(BaseModel):
         self.api_username = config.username
         self.api_password = config.password
         self.server_name = config.name
+        self.config_error = ""
 
 
 def get_settings() -> Settings:
@@ -147,9 +184,37 @@ def get_settings() -> Settings:
             tool_profile=tool_profile,
             muted_tools=muted_tools,
         )
+    except ConfigurationError:
+        raise
     except Exception as e:
-        raise ConfigurationError(f"Failed to load configuration: {e}")
+        raise ConfigurationError(f"Failed to load configuration: {e}") from e
+
+
+def _init_module_settings() -> Settings:
+    """Initialize module-level settings without failing import when unconfigured.
+
+    Preserves any file-specific ConfigurationError on settings.config_error so
+    connection attempts surface the original server.yml parse/validation error.
+    """
+    has_config_file = SERVER_CONFIG_PATH.exists()
+    try:
+        return get_settings()
+    except ConfigurationError as exc:
+        tool_profile, muted_tools = parse_profile_flags(DEFAULT_TOOL_PROFILE)
+        return Settings(
+            api_url=os.getenv("HUMMINGBOT_API_URL", "http://localhost:8000"),
+            api_username="",
+            api_password="",
+            config_error=str(exc) if has_config_file else "",
+            server_name=os.getenv("HUMMINGBOT_SERVER_NAME", "default"),
+            connection_timeout=float(os.getenv("HUMMINGBOT_TIMEOUT", "30.0")),
+            max_retries=int(os.getenv("HUMMINGBOT_MAX_RETRIES", "3")),
+            retry_delay=float(os.getenv("HUMMINGBOT_RETRY_DELAY", "2.0")),
+            log_level=os.getenv("HUMMINGBOT_LOG_LEVEL", "INFO"),
+            tool_profile=tool_profile,
+            muted_tools=muted_tools,
+        )
 
 
 # Global settings instance
-settings = get_settings()
+settings = _init_module_settings()
