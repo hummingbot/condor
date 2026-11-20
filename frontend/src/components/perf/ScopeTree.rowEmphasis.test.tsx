@@ -54,7 +54,7 @@ const controller = (bot: string, id: string): ControllerInfo =>
 
 /**
  * An executor opened by hand: no bot behind it, so it lands in a `grp:` row
- * nested under the fleet's single "Unattached" row.
+ * nested under the fleet's single "Not part of a bot" row.
  */
 const looseExecutor = (id: string): ExecutorInfo =>
   ({
@@ -135,13 +135,13 @@ afterEach(() => {
 
 describe("ScopeTree row emphasis", () => {
   it("draws the unattached-executors row with the same weight and colour as a bot", () => {
-    expect(nameClass("Unattached")).toBe(nameClass("hummingbot-alpha-1"));
-    expect(nameClass("Unattached")).toContain("font-semibold");
-    expect(nameClass("Unattached")).toContain("text-[var(--color-text)]");
+    expect(nameClass("Not part of a bot")).toBe(nameClass("hummingbot-alpha-1"));
+    expect(nameClass("Not part of a bot")).toContain("font-semibold");
+    expect(nameClass("Not part of a bot")).toContain("text-[var(--color-text)]");
   });
 
   it("still lets the rows nested under them recede", () => {
-    // "main" is now a detail *of* the "Unattached" row — one of the
+    // "main" is now a detail *of* the "Not part of a bot" row — one of the
     // `controller_id`s it may gather — rather than a fleet child in its own
     // right, so it recedes exactly as a controller under a bot does.
     for (const nested of ["main", "pmm_1", "exec-a"]) {

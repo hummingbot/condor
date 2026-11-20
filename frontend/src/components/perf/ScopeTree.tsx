@@ -117,7 +117,7 @@ function subtitle(node: PerfNode, showBot: boolean): string {
     // up to.
     case "orphans": {
       const execs = node.leaves.length;
-      return `${execs} executor${execs !== 1 ? "s" : ""} · under no controller`;
+      return `${execs} executor${execs !== 1 ? "s" : ""} · not run by a bot`;
     }
     // Counted in executors, because that is all a group ever holds: it exists
     // precisely for the leaves no controller claims, so the bot row's wording

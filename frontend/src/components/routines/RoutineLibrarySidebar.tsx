@@ -43,6 +43,7 @@ export function RoutineLibrarySidebar({
   stopping = false,
   listRef,
   reportInfo,
+  phone,
 }: {
   /** Every routine, for the bubbles' counts — not just the ones in scope. */
   routines: RoutineInfo[];
@@ -62,6 +63,10 @@ export function RoutineLibrarySidebar({
   /** The browser scrolls the active card into view through this. */
   listRef: React.RefObject<HTMLDivElement | null>;
   reportInfo: Map<string, RoutineReportInfo>;
+  /** The /routines page on a phone shows the list and the report one at a
+   *  time: `"full"` is the list filling the screen, `"hidden"` the report's
+   *  turn. Neither applies from md up, where the two sit side by side. */
+  phone?: "full" | "hidden";
 }) {
   const agents = useMemo(() => routineAgents(routines), [routines]);
   const condorCount = routines.filter((r) => !routineAgent(r)).length;
@@ -129,8 +134,16 @@ export function RoutineLibrarySidebar({
 
   return (
     <div
-      className={`flex flex-col border-r border-[var(--color-border)] bg-[var(--color-surface)] transition-all ${
-        compact ? "w-12" : "w-64"
+      className={`flex-col border-r border-[var(--color-border)] bg-[var(--color-surface)] transition-all ${
+        phone === "hidden" ? "hidden md:flex" : "flex"
+      } ${
+        phone === "full"
+          ? compact
+            ? "w-full md:w-12"
+            : "w-full md:w-64"
+          : compact
+            ? "w-12"
+            : "w-64"
       }`}
     >
       {/* Header */}
@@ -142,7 +155,7 @@ export function RoutineLibrarySidebar({
         )}
         <button
           onClick={onToggleCompact}
-          className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+          className={`${phone ? "hidden md:inline-flex" : ""} rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]`}
           title={compact ? "Expand the library" : "Collapse to the rail"}
         >
           {compact ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronLeft className="h-3.5 w-3.5" />}

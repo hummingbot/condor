@@ -58,7 +58,7 @@ export const POSITION_DEFAULTS: PositionState = {
   side: 1,
   amount: 0,
   entry_price: 0,
-  leverage: 10,
+  leverage: 1,
   stop_loss: 0.03,
   take_profit: 0.02,
   time_limit: 0,

@@ -1272,6 +1272,8 @@ export function PerfBrowser({
     () => nodes.get(effectiveScopeId) ?? rootNode,
     [nodes, effectiveScopeId, rootNode],
   );
+  // Nothing running at fleet scope: the empty card with Deploy is the page.
+  const hideEmptyFigures = emptyPopulation && scope.kind === "fleet";
 
   /**
    * How big the tree is, for the button that selects all of it.
@@ -2729,7 +2731,7 @@ export function PerfBrowser({
                 botName={scopeBotName ?? undefined}
               >
                 <span className="block truncate text-[10px] text-[var(--color-text-muted)]">
-                  {plural(scopedLeaves.length, scopeNoun)} aggregated
+                  {plural(scopedLeaves.length, scopeNoun)}
                   {filtersActive && " · filtered"}
                 </span>
                 <UnpricedNote leaves={unpricedLeaves} />
@@ -2751,12 +2753,12 @@ export function PerfBrowser({
                       : scope.kind !== "fleet"
                         ? scope.label
                         : population === "running"
-                          ? "All controllers combined"
+                          ? "Your bots"
                           : "Everything that has finished"}
                   </span>
                 </h2>
                 <span className="text-[10px] text-[var(--color-text-muted)] block truncate">
-                  {plural(scopedLeaves.length, scopeNoun)} aggregated
+                  {plural(scopedLeaves.length, scopeNoun)}
                   {filtersActive && " · filtered"}
                 </span>
                 <UnpricedNote leaves={unpricedLeaves} />
@@ -3113,8 +3115,8 @@ export function PerfBrowser({
               <div className="shrink-0 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3">
                 <p className="text-sm font-medium">No bots running</p>
                 <p className="mt-1 text-xs text-[var(--color-text-muted)]">
-                  Nothing is deployed on this server and no executor is open, so the figures below
-                  are an absence rather than a result. What has already run is under Terminated.
+                  Nothing is deployed on this server and no executor is open. Deploy a bot to start
+                  trading; what has already run is under Terminated.
                 </p>
                 {scope.kind === "fleet" && (
                   <button
@@ -3128,8 +3130,14 @@ export function PerfBrowser({
                 )}
               </div>
             ) : null}
-            {/* Headline numbers first: the chart below is the shape of these. */}
-            <div className="shrink-0 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3">
+            {/* Headline numbers first: the chart below is the shape of these.
+                With nothing running at fleet scope the tiles and the chart are
+                a wall of $0.00 under the empty card (UX review), so both are
+                hidden — not unmounted: the chart box's size observer attaches
+                once, on mount, and has to be there when the first bot lands. */}
+            <div
+              className={`shrink-0 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 ${hideEmptyFigures ? "hidden" : ""}`}
+            >
               {/* A fixed set of tiles, not a set that depends on what the scope
                   happens to have. Two reasons. The strip's height decides the
                   chart's, so tiles coming and going would resize the chart as
@@ -3313,7 +3321,7 @@ export function PerfBrowser({
                 it clips itself instead of covering its neighbour. */}
             <div
               ref={chartRef}
-              className="relative flex-1 overflow-hidden"
+              className={`relative flex-1 overflow-hidden ${hideEmptyFigures ? "hidden" : ""}`}
               style={{ minHeight: MIN_CHART_PX + CHART_CHROME_PX }}
             >
               <div className="absolute inset-0">

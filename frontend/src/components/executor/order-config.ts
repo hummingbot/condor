@@ -34,7 +34,7 @@ export type OrderAction =
 export const ORDER_DEFAULTS: OrderState = {
   side: 1,
   amount: 0,
-  execution_strategy: "LIMIT",
+  execution_strategy: "MARKET",
   price: 0,
   leverage: 1,
   chaser_distance: 0.0005,

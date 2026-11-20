@@ -68,9 +68,9 @@ function buildGroups(server: string | null, isAdmin: boolean): TabGroup[] {
     {
       label: server ? `Server · ${server}` : "Server",
       tabs: [
+        { key: "keys", label: "Keys and Wallets", icon: KeyRound },
         { key: "api", label: "Hummingbot API", icon: ServerCog },
         { key: "gateway", label: "Gateway", icon: Network },
-        { key: "keys", label: "Keys and Wallets", icon: KeyRound },
       ],
     },
     {
@@ -118,14 +118,17 @@ export function Settings() {
 
   const groups = buildGroups(server, isAdmin);
   const tabs = groups.flatMap((g) => g.tabs);
-  const requested = (params.get("tab") as TabKey) || "servers";
+  // Land on what most people open Settings for — their exchange keys — once
+  // there is a server to hold them; before that, adding a server is step one.
+  const landing: TabKey = server ? "keys" : "servers";
+  const requested = (params.get("tab") as TabKey) || landing;
   const available = tabs.some((t) => t.key === requested);
   // A deep link to ?tab=admin or ?tab=updates from a seat that is not (or no
   // longer) an admin falls back rather than rendering an empty page.
-  const tab = available ? requested : "servers";
+  const tab = available ? requested : landing;
   // ...but silently is the wrong way to fall back when the product itself
   // sent the link. The "Updates available" notice links to ?tab=updates, so a
-  // non-admin seat clicks it, lands on Servers, and sees nothing happen at
+  // non-admin seat clicks it, lands on the default tab, and sees nothing happen at
   // all — the tab is gone, the notice is still there, and nothing anywhere
   // says why. Say why.
   const deniedTab =

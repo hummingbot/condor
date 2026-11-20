@@ -106,8 +106,8 @@ describe("agentBucketLabel", () => {
     // Pinned as words rather than through the constants: the point of the
     // bucket is what it *says*. A deed written at a ref-less door joins to
     // nothing, so a record landing here can still be Condor's own.
-    expect(OUTSIDE_LABEL).toBe("No record found");
-    expect(BEFORE_LEDGER_LABEL).toBe("Before the ledger");
+    expect(OUTSIDE_LABEL).toBe("Owner unknown");
+    expect(BEFORE_LEDGER_LABEL).toBe("Before tracking began");
   });
 
   it("keeps the bucket values every saved filter URL carries", () => {

@@ -31,6 +31,8 @@ interface Props {
   /** Width utility for the panel, e.g. `w-44`. */
   className?: string;
   role?: React.AriaRole;
+  /** Names the panel for assistive tech, e.g. a `role="dialog"` popup. */
+  "aria-label"?: string;
   children: React.ReactNode;
 }
 
@@ -77,6 +79,7 @@ export function AnchoredMenu({
   gap = DEFAULT_GAP,
   className = "",
   role,
+  "aria-label": ariaLabel,
   children,
 }: Props) {
   const menuRef = useRef<HTMLDivElement>(null);
@@ -176,6 +179,7 @@ export function AnchoredMenu({
     <div
       ref={menuRef}
       role={role}
+      aria-label={ariaLabel}
       // Focusable on open without joining the tab order itself, so Tab from the
       // panel steps into the options rather than skipping the menu entirely.
       tabIndex={-1}

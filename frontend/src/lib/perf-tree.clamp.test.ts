@@ -150,7 +150,7 @@ describe("emptyScopeNode", () => {
     expect(emptyScopeNode("grp:main", "main").kind).toBe("group");
     expect(emptyScopeNode("ctrl:alpha:pmm_1", "pmm_1").kind).toBe("controller");
     expect(emptyScopeNode("exec:e1", "e1").kind).toBe("executor");
-    expect(emptyScopeNode("orphans", "Unattached").kind).toBe("orphans");
+    expect(emptyScopeNode("orphans", "Not part of a bot").kind).toBe("orphans");
     expect(emptyScopeNode("all", "All").kind).toBe("fleet");
   });
 });

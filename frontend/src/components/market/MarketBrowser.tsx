@@ -261,7 +261,7 @@ export function MarketBrowser({
       role="dialog"
       aria-label="Browse markets"
       onKeyDown={handleKeyDown}
-      className="absolute left-0 top-0 z-40 flex w-full max-w-3xl max-h-[min(34rem,70vh)] rounded-br-lg border-b border-r border-[var(--color-border)] bg-[var(--color-bg)] shadow-lg"
+      className="fixed inset-0 z-50 flex w-full md:absolute md:inset-auto md:left-0 md:top-0 md:z-40 md:max-w-3xl md:max-h-[min(34rem,70vh)] md:rounded-br-lg md:border-b md:border-r border-[var(--color-border)] bg-[var(--color-bg)] shadow-lg"
     >
       {/* The venue axis. Re-lists the table; never moves the chart. */}
       <VenueRail

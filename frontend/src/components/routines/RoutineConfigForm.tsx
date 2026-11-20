@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 
 import type { RoutineFieldInfo } from "@/lib/api";
 import { api } from "@/lib/api";
+import { humanizeFieldName } from "@/lib/routineFields";
+import { SegmentedControl } from "@/components/ui/SegmentedControl";
 import { useServer } from "@/hooks/useServer";
 
 interface Props {
@@ -98,48 +100,85 @@ function NumberField({
   );
 }
 
+/**
+ * The form a routine's `Config` turns into.
+ *
+ * Labelled by the field's name, with its description as help text underneath
+ * (UX review): the description used to *be* the label, so a single field could
+ * carry a whole sentence above its input, centred and squeezed into a third of
+ * the width. One left-aligned column now, and a field with a fixed set of
+ * values is a segmented control rather than a box to type the right word into.
+ */
 export function RoutineConfigForm({ fields, values, onChange }: Props) {
   return (
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-      {Object.entries(fields).map(([key, field]) => (
-        <div key={key}>
-          <label className="mb-1 block text-xs font-medium text-[var(--color-text-muted)]">
-            {field.description || key}
-          </label>
-          {field.widget === "select" && field.options_from ? (
-            <SelectField
-              field={field}
-              value={values[key]}
-              onChange={(v) => onChange(key, v)}
-            />
-          ) : field.type === "bool" ? (
-            <button
-              type="button"
-              onClick={() => onChange(key, !values[key])}
-              className={`rounded px-3 py-1.5 text-xs font-medium transition-colors ${
-                values[key]
-                  ? "bg-[var(--color-primary-fill)]/20 text-[var(--color-primary)]"
-                  : "bg-[var(--color-surface-hover)] text-[var(--color-text-muted)]"
-              }`}
-            >
-              {values[key] ? "ON" : "OFF"}
-            </button>
-          ) : field.type === "int" || field.type === "float" ? (
-            <NumberField
-              fieldType={field.type}
-              value={values[key] ?? field.default ?? ""}
-              onChange={(v) => onChange(key, v)}
-            />
-          ) : (
-            <input
-              type="text"
-              value={String(values[key] ?? field.default ?? "")}
-              onChange={(e) => onChange(key, e.target.value)}
-              className="w-full rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-sm text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none"
-            />
-          )}
-        </div>
-      ))}
+    <div className="flex flex-col gap-4 text-left">
+      {Object.entries(fields).map(([key, field]) => {
+        // `get_fields` falls back to the name when there is no description,
+        // which would only repeat the label.
+        const help = field.description && field.description !== key ? field.description : "";
+        const current = values[key] ?? field.default ?? "";
+        return (
+          <div key={key}>
+            <label className="mb-1 block text-xs font-medium text-[var(--color-text)]">
+              {humanizeFieldName(key)}
+            </label>
+            {field.choices && field.choices.length > 0 ? (
+              <SegmentedControl
+                size="sm"
+                aria-label={humanizeFieldName(key)}
+                value={String(current)}
+                onChange={(v) => {
+                  const picked = field.choices!.find((c) => String(c) === v);
+                  onChange(key, picked ?? v);
+                }}
+                options={field.choices.map((c) => ({ value: String(c), label: String(c) }))}
+              />
+            ) : field.widget === "select" && field.options_from ? (
+              <SelectField
+                field={field}
+                value={values[key]}
+                onChange={(v) => onChange(key, v)}
+              />
+            ) : field.type === "bool" ? (
+              <button
+                type="button"
+                role="switch"
+                aria-checked={!!values[key]}
+                onClick={() => onChange(key, !values[key])}
+                className={`rounded px-3 py-1.5 text-xs font-medium transition-colors ${
+                  values[key]
+                    ? "bg-[var(--color-primary-fill)]/20 text-[var(--color-primary)]"
+                    : "bg-[var(--color-surface-hover)] text-[var(--color-text-muted)]"
+                }`}
+              >
+                {values[key] ? "ON" : "OFF"}
+              </button>
+            ) : field.type === "int" || field.type === "float" ? (
+              <NumberField
+                fieldType={field.type}
+                value={current}
+                onChange={(v) => onChange(key, v)}
+              />
+            ) : (
+              <input
+                type="text"
+                value={String(current)}
+                onChange={(e) => onChange(key, e.target.value)}
+                className="w-full rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-sm text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none"
+              />
+            )}
+            {help && (
+              <div className="mt-1 space-y-0.5 text-[11px] leading-snug text-[var(--color-text-muted)]">
+                {/* "a = … | b = …" is how several routines document their
+                    modes; one line each reads far better than one run-on. */}
+                {help.split(" | ").map((line, i) => (
+                  <p key={i}>{line}</p>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

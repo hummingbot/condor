@@ -65,7 +65,7 @@ export const GRID_DEFAULTS: GridState = {
   max_open_orders: 5,
   max_orders_per_batch: 2,
   order_frequency: 1,
-  leverage: 10,
+  leverage: 1,
   take_profit: 0.0002,
   open_order_type: 2,
   take_profit_order_type: 2,

@@ -183,7 +183,7 @@ describe("/bots, grouped", () => {
     // The reader pressed Owner: the bucket is where the fleet's trading is
     // added up under whoever made it, and "they all agree" is the case where
     // that total is easiest to read, not a reason to withhold it.
-    expect(text()).toContain("Before the ledger");
+    expect(text()).toContain("Before tracking began");
     expect(hasRow("alpha")).toBe(true);
   });
 

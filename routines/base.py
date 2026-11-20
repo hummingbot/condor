@@ -10,6 +10,7 @@ Routine Types:
 import importlib
 import logging
 import re
+import typing
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -462,6 +463,13 @@ class RoutineInfo:
                 "default": field_info.default,
                 "description": field_info.description or name,
             }
+            # A field with a fixed set of values: the dashboard draws it as a
+            # segmented control instead of a free-text box. Read from a
+            # ``Literal[...]`` annotation, or from an explicit ``choices`` hint
+            # for a plain ``str`` whose values the routine checks itself.
+            choices = _literal_choices(annotation)
+            if choices is not None:
+                entry["type"] = type(choices[0]).__name__
             # Pass through widget hints from json_schema_extra
             extra = field_info.json_schema_extra
             if isinstance(extra, dict):
@@ -469,8 +477,20 @@ class RoutineInfo:
                     entry["widget"] = extra["widget"]
                 if "options_from" in extra:
                     entry["options_from"] = extra["options_from"]
+                if isinstance(extra.get("choices"), (list, tuple)):
+                    choices = list(extra["choices"])
+            if choices:
+                entry["choices"] = choices
             fields[name] = entry
         return fields
+
+
+def _literal_choices(annotation) -> list | None:
+    """The values of a ``Literal[...]`` annotation, or None for anything else."""
+    if typing.get_origin(annotation) is not typing.Literal:
+        return None
+    values = list(typing.get_args(annotation))
+    return values or None
 
 
 def discover_routines(force_reload: bool = False) -> dict[str, RoutineInfo]:
