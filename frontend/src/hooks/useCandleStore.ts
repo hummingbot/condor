@@ -22,12 +22,20 @@ import { intervalSeconds } from "@/lib/gridExecutor";
  *
  * The old 30 s (sub-1h) / 120 s thresholds sat *below* the DEX poll period, so
  * every healthy pool chart was flagged between two polls.
+ *
+ * The 180 s ceiling belongs to the GeckoTerminal-polled channels only. Applied
+ * to every channel it made a dead exchange feed on a 1m chart take six minutes
+ * to say so; an exchange channel is floored by its own 10 s poll instead, which
+ * leaves the two-candle term to decide (two minutes on a 1m chart).
  */
-const SLOWEST_POLL_MS = 180_000; // _GECKO_POLL_MAX
+const GECKO_SLOWEST_POLL_MS = 180_000; // _GECKO_POLL_MAX
+const CLOB_SLOWEST_POLL_MS = 10_000; // min(interval, 10) s
 const STALE_CHECK_INTERVAL_MS = 10_000; // check every 10s
 
-export function staleThresholdMs(interval: string): number {
-  return Math.max(2 * SLOWEST_POLL_MS, 2 * intervalSeconds(interval) * 1000);
+/** `geckoPolled`: the channel is fed by the GeckoTerminal poll, not an exchange. */
+export function staleThresholdMs(interval: string, geckoPolled = false): number {
+  const slowestPoll = geckoPolled ? GECKO_SLOWEST_POLL_MS : CLOB_SLOWEST_POLL_MS;
+  return Math.max(2 * slowestPoll, 2 * intervalSeconds(interval) * 1000);
 }
 
 /**
@@ -49,6 +57,12 @@ export function useCandleStore(
    * (every CLOB chart) the channel keeps its five segments, byte for byte.
    */
   poolAddress?: string,
+  /**
+   * The venue's candles come from the GeckoTerminal poll (`gecko_candles` on
+   * `GET /market/venues`), which sets how long a silence is still healthy. A
+   * pinned pool is always one, so `poolAddress` alone implies it.
+   */
+  geckoCandles = false,
 ): {
   candles: CandleData[];
   isStale: boolean;
@@ -56,6 +70,8 @@ export function useCandleStore(
   setDuration: (seconds: number) => void;
 } {
   const key = server ? candleChannelKey(server, connector, pair, interval, poolAddress) : "";
+
+  const geckoPolled = geckoCandles || !!poolAddress;
 
   const [candles, setCandles] = useState<CandleData[]>([]);
   const [isStale, setIsStale] = useState(false);
@@ -87,7 +103,7 @@ export function useCandleStore(
     });
 
     // Periodic staleness check
-    const threshold = staleThresholdMs(interval);
+    const threshold = staleThresholdMs(interval, geckoPolled);
     const timer = setInterval(() => {
       if (keyRef.current !== key) return;
       const age = candleStore.getLastUpdateAge(key);
@@ -99,7 +115,7 @@ export function useCandleStore(
       clearInterval(timer);
       candleStore.unsubscribe(key);
     };
-  }, [key, interval]);
+  }, [key, interval, geckoPolled]);
 
   const mergeCandles = (c: CandleData[]) => {
     if (key) candleStore.mergeCandles(key, c);

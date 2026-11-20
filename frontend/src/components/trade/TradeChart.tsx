@@ -122,6 +122,8 @@ interface TradeChartProps {
    * the pair. Set by the DEX pool workspace; every CLOB chart omits it.
    */
   poolAddress?: string;
+  /** The venue's candles are GeckoTerminal-polled; sets the stalled-feed bound. */
+  geckoCandles?: boolean;
   lookbackSeconds: number;
   startPrice: number;
   endPrice: number;
@@ -151,6 +153,7 @@ export function TradeChart({
   pair,
   interval,
   poolAddress,
+  geckoCandles,
   lookbackSeconds,
   startPrice,
   endPrice,
@@ -257,6 +260,7 @@ export function TradeChart({
     pair,
     interval,
     poolAddress,
+    geckoCandles,
   );
 
   // ── Only the picked range is drawn ──

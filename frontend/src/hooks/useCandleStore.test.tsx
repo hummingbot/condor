@@ -225,15 +225,23 @@ describe("staleThresholdMs", () => {
     ["4h", 14400],
     ["1d", 86400],
   ])("outlasts two polls and two candles on %s", (interval, sec) => {
-    const threshold = staleThresholdMs(interval);
+    const threshold = staleThresholdMs(interval, true);
     expect(threshold).toBeGreaterThanOrEqual(2 * geckoPollMs(sec));
     expect(threshold).toBeGreaterThanOrEqual(2 * 180_000);
     expect(threshold).toBeGreaterThanOrEqual(2 * sec * 1000);
   });
 
-  it("is six minutes on a 1m chart and two candles on a coarse one", () => {
-    expect(staleThresholdMs("1m")).toBe(360_000);
-    expect(staleThresholdMs("15m")).toBe(1_800_000);
+  it("is six minutes on a 1m pool chart and two candles on a coarse one", () => {
+    expect(staleThresholdMs("1m", true)).toBe(360_000);
+    expect(staleThresholdMs("15m", true)).toBe(1_800_000);
+  });
+
+  // The 180 s floor is the GeckoTerminal poll ceiling. On an exchange channel,
+  // which re-fetches every 10 s, it made a dead 1m feed take six minutes to say so.
+  it("does not hold an exchange chart to the pool poll's ceiling", () => {
+    expect(staleThresholdMs("1m")).toBe(120_000);
+    expect(staleThresholdMs("5m")).toBe(600_000);
+    expect(staleThresholdMs("15m")).toBe(staleThresholdMs("15m", true));
   });
 });
 
@@ -283,5 +291,44 @@ describe("useCandleStore staleness", () => {
     // A frame clears it.
     act(() => store.push("candles:srv:meteora:SOL-USDC:1m:pool1", [candle(1, 100)]));
     expect(stale.value).toBe(false);
+  });
+
+  function VenueHarness({ geckoCandles }: { geckoCandles: boolean }) {
+    const { isStale } = useCandleStore(
+      "srv",
+      geckoCandles ? "xrpl" : "binance",
+      "XRP-USDT",
+      "1m",
+      undefined,
+      geckoCandles,
+    );
+    useEffect(() => {
+      stale.value = isStale;
+    });
+    return null;
+  }
+
+  it("flags a dead exchange feed on a 1m chart after two minutes, not six", () => {
+    act(() => root.render(<VenueHarness geckoCandles={false} />));
+
+    store.age = 119_000;
+    tick();
+    expect(stale.value).toBe(false);
+
+    store.age = 121_000;
+    tick();
+    expect(stale.value).toBe(true);
+  });
+
+  it("gives a gecko-charted venue with no pinned pool the pool bound", () => {
+    act(() => root.render(<VenueHarness geckoCandles />));
+
+    store.age = 121_000;
+    tick();
+    expect(stale.value).toBe(false);
+
+    store.age = 361_000;
+    tick();
+    expect(stale.value).toBe(true);
   });
 });

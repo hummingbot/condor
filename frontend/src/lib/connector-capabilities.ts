@@ -31,6 +31,12 @@ export interface VenueTraits {
   /** This venue can take an `lp_executor` CLMM position. */
   clmmLp: boolean;
   /**
+   * Its candles are polled from GeckoTerminal rather than streamed by the
+   * exchange (`xrpl`, every Gateway network). Independent of the order book,
+   * for the reason above; what it decides is how long a quiet chart is healthy.
+   */
+  geckoCandles?: boolean;
+  /**
    * The account holds credentials for this venue, so an executor created here
    * has something to execute against. False means the venue reached the list on
    * its market data alone: every read works, nothing can be traded.

@@ -1138,6 +1138,8 @@ interface WireVenue {
   name: string;
   hummingbot_market_data: boolean;
   clmm_lp: boolean;
+  /** Optional: an older backend does not report it, which reads as false. */
+  gecko_candles?: boolean;
   /**
    * Optional only so a frontend that gets ahead of its backend degrades the safe
    * way: a server that predates ARCH-271 omits the key, and an absent trait must
@@ -3710,6 +3712,7 @@ export const api = {
         name: v.name,
         hummingbotMarketData: !!v.hummingbot_market_data,
         clmmLp: !!v.clmm_lp,
+        geckoCandles: !!v.gecko_candles,
         credentialed: v.credentialed ?? true,
       })),
     ),

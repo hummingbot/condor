@@ -769,6 +769,7 @@ export function CreateExecutor() {
               connector={connector}
               pair={pair}
               interval={chartInterval}
+              geckoCandles={venues.some((v) => v.name === connector && v.geckoCandles)}
               lookbackSeconds={gridState.lookbackSeconds}
 
               startPrice={chartProps.startPrice}
