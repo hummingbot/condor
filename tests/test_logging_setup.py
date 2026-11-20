@@ -88,6 +88,16 @@ def test_a_bot_token_never_reaches_the_file():
         ("connecting to http://admin:hunter2@localhost:8000/x", "hunter2"),
         ("header Authorization: Bearer abcdef123456ghijkl", "abcdef123456ghijkl"),
         ("hub_token: tok_live_abcdef", "tok_live_abcdef"),
+        # The hummingbot-api WS handshake URL: ?token=base64(user:password).
+        (
+            "401, message='Invalid response status', "
+            "url='ws://hbapi:8000/ws/market-data?token=YWRtaW46c2VjcmV0cGFzcw=='",
+            "YWRtaW46c2VjcmV0cGFzcw==",
+        ),
+        (
+            "ws://hbapi:8000/ws/executors?account=master&token=YWRtaW46c2VjcmV0cGFzcw%3D%3D",
+            "YWRtaW46c2VjcmV0cGFzcw",
+        ),
         ("web_jwt_secret=deadbeefcafe", "deadbeefcafe"),
     ],
 )
@@ -101,6 +111,7 @@ def test_secret_shapes_are_redacted(line, secret):
     "line",
     [
         "swap token=SOL amount=1.5 on jupiter",
+        "GET /pools?token=SOL&quote=USDC",
         "tokens: ['SOL', 'USDC'] for pool 8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj",
         "executor 7f3a closed at 12:34:56 pnl=$1,204.50",
         "Dashboard on http://127.0.0.1:8080 — reachable on the tailnet only.",

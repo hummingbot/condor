@@ -68,11 +68,20 @@ _SECRET_KV = re.compile(r"""(?ix)
     """)
 
 
+# ?token=<credential> in a URL. The hummingbot-api client opens its sockets at
+# ``ws://host/ws/...?token=<base64(user:password)>``, and a failed handshake
+# puts the whole URL in the exception text. Narrow on purpose, for the reason
+# ``token`` is not a key above: only as a URL query parameter, and only a value
+# of 12+ characters, so ``?token=SOL`` and ``token=SOL`` both stay readable.
+_URL_QUERY_TOKEN = re.compile(r"([?&]token=)[A-Za-z0-9+/=%_.~-]{12,}")
+
+
 def redact(text: str) -> str:
     """``text`` with bot tokens, URL passwords and secret-looking values removed."""
     text = _BOT_TOKEN.sub(rf"\1:{_REDACTED}", text)
     text = _URL_USERINFO.sub(rf"\1:{_REDACTED}@", text)
     text = _BEARER.sub(rf"\1 {_REDACTED}", text)
+    text = _URL_QUERY_TOKEN.sub(rf"\1{_REDACTED}", text)
     return _SECRET_KV.sub(rf"\1{_REDACTED}", text)
 
 
