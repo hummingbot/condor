@@ -102,7 +102,7 @@ The config MUST include `controller_type: "generic"` and `controller_name: "pmm_
 | connector_name | str | — | Exchange connector — use value from [CURRENT CONFIG] |
 | trading_pair | str | — | Trading pair — use value from [CURRENT CONFIG] |
 | total_amount_quote | Decimal | 100 | Total quote amount for the controller |
-| portfolio_allocation | Decimal | 0.1 | Fraction of total_amount to use (0.1 = 10%) |
+| portfolio_allocation | Decimal | 0.1 | Fraction of total_amount_quote split across ALL buy + sell levels combined (`order_quote = total_amount_quote × portfolio_allocation × w_level ÷ (sum(buy_amounts_pct) + sum(sell_amounts_pct))`) |
 | target_base_pct | Decimal | 0.5 | Target position as % of allocation |
 | min_base_pct | Decimal | 0.3 | Min position % (below → only accumulate) |
 | max_base_pct | Decimal | 0.7 | Max position % (above → only reduce) |

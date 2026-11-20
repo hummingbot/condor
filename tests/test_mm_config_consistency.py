@@ -268,3 +268,164 @@ def test_the_documented_options_are_the_routines_real_fields():
 
     assert "recent_closes" not in documented
     assert documented <= fields, f"documented but not in Config: {documented - fields}"
+
+
+# ── #282: order sizing counts both buy and sell levels ───────────────────────
+
+
+def _load_pmm_mister_module():
+    """Import pmm_mister.py with lightweight hummingbot stubs so
+    PMMisterConfig.get_spreads_and_amounts_in_quote can be executed directly."""
+    from decimal import Decimal
+    from enum import Enum
+    import importlib.util
+    import sys
+    import types
+    from unittest.mock import patch
+    from pydantic import BaseModel
+
+    class TradeType(Enum):
+        BUY = 1
+        SELL = 2
+
+    class OrderType(Enum):
+        MARKET = 1
+        LIMIT = 2
+        LIMIT_MAKER = 3
+
+    class PositionMode(Enum):
+        HEDGE = 1
+        ONEWAY = 2
+
+    class ControllerConfigBase(BaseModel):
+        total_amount_quote: Decimal = Decimal("100")
+
+    def parse_comma_separated_list(v):
+        if isinstance(v, list):
+            return v
+        return [float(x.strip()) for x in str(v).split(",") if x.strip()]
+
+    def parse_enum_value(enum_cls, v, _field_name):
+        if isinstance(v, enum_cls):
+            return v
+        return enum_cls[str(v)] if str(v) in enum_cls.__members__ else enum_cls(int(v))
+
+    common_dt = types.ModuleType("hummingbot.core.data_type.common")
+    common_dt.MarketDict = dict
+    common_dt.OrderType = OrderType
+    common_dt.PositionAction = object
+    common_dt.PositionMode = PositionMode
+    common_dt.PositionSide = object
+    common_dt.PriceType = object
+    common_dt.TradeType = TradeType
+
+    ctrl_base = types.ModuleType("hummingbot.strategy_v2.controllers.controller_base")
+    ctrl_base.ControllerBase = object
+    ctrl_base.ControllerConfigBase = ControllerConfigBase
+
+    exec_dt = types.ModuleType("hummingbot.strategy_v2.executors.data_types")
+    exec_dt.ConnectorPair = object
+
+    order_dt = types.ModuleType("hummingbot.strategy_v2.executors.order_executor.data_types")
+    order_dt.ExecutionStrategy = object
+    order_dt.OrderExecutorConfig = object
+
+    pos_dt = types.ModuleType("hummingbot.strategy_v2.executors.position_executor.data_types")
+    pos_dt.PositionExecutorConfig = object
+    pos_dt.TripleBarrierConfig = object
+
+    actions_mod = types.ModuleType("hummingbot.strategy_v2.models.executor_actions")
+    actions_mod.CreateExecutorAction = object
+    actions_mod.ExecutorAction = object
+    actions_mod.StopExecutorAction = object
+
+    utils_common = types.ModuleType("hummingbot.strategy_v2.utils.common")
+    utils_common.parse_comma_separated_list = parse_comma_separated_list
+    utils_common.parse_enum_value = parse_enum_value
+
+    stubs = {
+        "hummingbot": types.ModuleType("hummingbot"),
+        "hummingbot.core": types.ModuleType("hummingbot.core"),
+        "hummingbot.core.data_type": types.ModuleType("hummingbot.core.data_type"),
+        "hummingbot.core.data_type.common": common_dt,
+        "hummingbot.strategy_v2": types.ModuleType("hummingbot.strategy_v2"),
+        "hummingbot.strategy_v2.controllers": types.ModuleType("hummingbot.strategy_v2.controllers"),
+        "hummingbot.strategy_v2.controllers.controller_base": ctrl_base,
+        "hummingbot.strategy_v2.executors": types.ModuleType("hummingbot.strategy_v2.executors"),
+        "hummingbot.strategy_v2.executors.data_types": exec_dt,
+        "hummingbot.strategy_v2.executors.order_executor": types.ModuleType("hummingbot.strategy_v2.executors.order_executor"),
+        "hummingbot.strategy_v2.executors.order_executor.data_types": order_dt,
+        "hummingbot.strategy_v2.executors.position_executor": types.ModuleType("hummingbot.strategy_v2.executors.position_executor"),
+        "hummingbot.strategy_v2.executors.position_executor.data_types": pos_dt,
+        "hummingbot.strategy_v2.models": types.ModuleType("hummingbot.strategy_v2.models"),
+        "hummingbot.strategy_v2.models.executor_actions": actions_mod,
+        "hummingbot.strategy_v2.utils": types.ModuleType("hummingbot.strategy_v2.utils"),
+        "hummingbot.strategy_v2.utils.common": utils_common,
+    }
+    with patch.dict(sys.modules, stubs):
+        spec = importlib.util.spec_from_file_location("pmm_mister", CONTROLLER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    return module, TradeType
+
+
+def test_controller_splits_allocation_across_buy_and_sell_weights_combined():
+    """PMMisterConfig.get_spreads_and_amounts_in_quote divides by
+    sum(buy_amounts_pct) + sum(sell_amounts_pct), so $120 at 20% allocation across
+    2 buy + 2 sell equal-weight levels produces $6 per order on both BUY and SELL
+    sides, not $12 (#282)."""
+    from decimal import Decimal
+
+    module, TradeType = _load_pmm_mister_module()
+    cfg = module.PMMisterConfig(
+        total_amount_quote=Decimal("120"),
+        portfolio_allocation=Decimal("0.2"),
+        buy_spreads=[0.0005, 0.001],
+        sell_spreads=[0.0006, 0.0012],
+        buy_amounts_pct=[Decimal("1"), Decimal("1")],
+        sell_amounts_pct=[Decimal("1"), Decimal("1")],
+    )
+    buy_spreads, buy_amounts = cfg.get_spreads_and_amounts_in_quote(TradeType.BUY)
+    sell_spreads, sell_amounts = cfg.get_spreads_and_amounts_in_quote(TradeType.SELL)
+
+    assert buy_spreads == [0.0005, 0.001]
+    assert sell_spreads == [0.0006, 0.0012]
+    assert [float(x) for x in buy_amounts] == [6.0, 6.0]
+    assert [float(x) for x in sell_amounts] == [6.0, 6.0]
+
+    # Unequal weights: $240 * 0.2 = $48 across weights [1, 3] + [2, 2] (total=8)
+    weighted_cfg = module.PMMisterConfig(
+        total_amount_quote=Decimal("240"),
+        portfolio_allocation=Decimal("0.2"),
+        buy_spreads=[0.0005, 0.001],
+        sell_spreads=[0.0006, 0.0012],
+        buy_amounts_pct=[Decimal("1"), Decimal("3")],
+        sell_amounts_pct=[Decimal("2"), Decimal("2")],
+    )
+    _, weighted_buy = weighted_cfg.get_spreads_and_amounts_in_quote(TradeType.BUY)
+    _, weighted_sell = weighted_cfg.get_spreads_and_amounts_in_quote(TradeType.SELL)
+    assert [float(x) for x in weighted_buy] == [6.0, 18.0]
+    assert [float(x) for x in weighted_sell] == [12.0, 12.0]
+
+
+def test_docs_count_both_buy_and_sell_levels_in_minimum_order_sizing():
+    """SKILL.md, AGENT.md, and hip_3_mm_operator/loop.md must state the both-sides
+    denominator and never claim 2 buy levels at $1000 x 10% is $50/order (#282)."""
+    skill_text = (MM / "skills/pmm_mister_deploy/SKILL.md").read_text(encoding="utf-8")
+    agent_text = (MM / "AGENT.md").read_text(encoding="utf-8")
+    hip3_text = (MM / "loops/hip_3_mm_operator/loop.md").read_text(encoding="utf-8")
+
+    # Old one-side example in AGENT.md is gone
+    assert "2 buy levels, each buy order is ~$50" not in agent_text
+    assert "total_amount_quote × portfolio_allocation ÷ number_of_levels` must exceed" not in skill_text
+
+    # All three explicitly divide by combined buy + sell weights/levels and document the $6 (#282) case
+    for doc_name, text in [
+        ("pmm_mister_deploy/SKILL.md", skill_text),
+        ("AGENT.md", agent_text),
+        ("hip_3_mm_operator/loop.md", hip3_text),
+    ]:
+        assert "sum(buy_amounts_pct) + sum(sell_amounts_pct)" in text, doc_name
+        assert "len(buy_spreads) + len(sell_spreads)" in text, doc_name
+        assert "$6" in text, doc_name
+
