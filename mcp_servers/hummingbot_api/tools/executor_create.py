@@ -396,6 +396,23 @@ async def reference_price(
         return None
 
 
+def _usd_quoted(pair: str) -> bool:
+    """Whether ``pair`` is quoted in a USD stable, so ``$`` means quote units.
+
+    A ``'$100'`` amount is 100 US dollars. The checks below compare it with
+    quote-denominated numbers -- a balance in the quote token, a price, a
+    ``min_notional`` -- and that comparison only means anything when one unit
+    of quote is one dollar. On ETH-BTC it read ``$100`` as 100 BTC and refused
+    an order the account could plainly fund (MH-09). Where the quote is not a
+    USD stable the ``$`` checks stand down: the venue still checks the order,
+    and a preflight that cannot do the arithmetic must not refuse on it.
+    """
+    # Lazy for the reason given in `reference_price`.
+    from condor.fetchers.market_data import USD_QUOTES
+
+    return "-" in pair and pair.rsplit("-", 1)[1].upper() in USD_QUOTES
+
+
 async def _base_amount_violation(
     client: Any,
     *,
@@ -409,7 +426,7 @@ async def _base_amount_violation(
     amount = _amount(config.get("amount"))
     if amount is None:
         usd_value = _usd_amount(config.get("amount"))
-        if usd_value is None:
+        if usd_value is None or not _usd_quoted(pair):
             return None
         # A '$' amount IS its notional, so the notional minimum needs no price.
         if min_notional is not None and usd_value < min_notional:
@@ -906,7 +923,7 @@ async def _required_spend(
         amount = _amount(config.get("amount"))
         if amount is None:
             usd_value = _usd_amount(config.get("amount"))
-            if usd_value is None:
+            if usd_value is None or not _usd_quoted(pair):
                 return None
             if buy:
                 # Spent in the quote currency, at face value.

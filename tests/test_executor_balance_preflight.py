@@ -211,3 +211,48 @@ def test_anything_unknown_lets_the_create_through(client):
     _position(client)
 
     assert len(client.creates) == 1
+
+
+# ---------------------------------------------------------------------------
+# A '$' amount is US dollars, which is quote units only on a USD-quoted pair
+# ---------------------------------------------------------------------------
+
+
+def _dollar_position(client, pair, side):
+    return asyncio.run(
+        executor_create.create_order_executor(
+            client,
+            connector_name="binance",
+            trading_pair=pair,
+            side=side,
+            amount="$100",
+            execution_strategy="MARKET",
+        )
+    )
+
+
+ETH_AND_BTC = [
+    {"token": "BTC", "units": 0.5, "available_units": 0.5},
+    {"token": "ETH", "units": 2, "available_units": 2},
+]
+
+
+@pytest.mark.parametrize("side", [1, 2])
+def test_a_dollar_amount_on_a_btc_quoted_pair_is_not_read_as_btc(side):
+    """ETH-BTC at 0.03: '$100' was refused as 100 BTC (buy) or 3,333 ETH (sell)."""
+    client = _Client(cached=_state(ETH_AND_BTC), price=0.03)
+
+    result = _dollar_position(client, "ETH-BTC", side)
+
+    assert "error" not in result
+    assert len(client.creates) == 1
+
+
+def test_a_dollar_amount_on_a_usd_quoted_pair_is_still_checked():
+    client = _Client(cached=_state(AVAX_ONLY))
+
+    result = _dollar_position(client, "AVAX-USDT", 1)
+
+    assert client.creates == []
+    assert "Insufficient balance on binance" in result["error"]
+    assert "100 USDT" in result["error"]

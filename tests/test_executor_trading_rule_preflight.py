@@ -311,3 +311,24 @@ def test_a_venue_that_spells_the_pair_its_own_way_still_answers():
     rules = asyncio.run(cache.get(client, "binance", "BTC-USDT"))
 
     assert rules == {"min_notional_size": 5.0}
+
+
+def test_a_dollar_amount_is_not_compared_with_a_btc_minimum():
+    """`min_notional` is in quote units: 0.0001 BTC is not a hundredth of a cent."""
+    rules = {"ETH-BTC": {"min_order_size": 0.001, "min_notional_size": 200.0}}
+    client = _Client(rules=rules, price=0.03)
+
+    result = asyncio.run(
+        executor_create.create_order_executor(
+            client,
+            connector_name="binance",
+            trading_pair="ETH-BTC",
+            side=1,
+            amount="$100",
+            execution_strategy="MARKET",
+        )
+    )
+
+    # $100 is below "200" only if dollars are read as BTC; nothing to refuse on.
+    assert "error" not in result
+    assert len(client.creates) == 1
