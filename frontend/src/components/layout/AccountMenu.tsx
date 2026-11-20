@@ -36,7 +36,7 @@ export function AccountMenu({ onReportIssue }: { onReportIssue: () => void }) {
         ref={setAnchor}
         onClick={() => setOpen(!open)}
         aria-expanded={open}
-        aria-haspopup="menu"
+        aria-haspopup="dialog"
         aria-label="Account menu"
         title="Account"
         className="ml-1 flex h-7 w-7 items-center justify-center rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] text-xs font-semibold text-[var(--color-text)] transition-colors hover:border-[var(--color-primary)]"
@@ -49,7 +49,11 @@ export function AccountMenu({ onReportIssue }: { onReportIssue: () => void }) {
         open={open}
         onClose={close}
         align="right"
-        role="menu"
+        // A labelled popup, not role="menu": it holds a theme switch and a
+        // checkbox alongside its buttons, and a menu role would promise
+        // arrow-key navigation it does not have. Tab moves through it.
+        role="dialog"
+        aria-label="Account"
         className="w-60 py-1"
       >
         <div className="border-b border-[var(--color-border)] px-3 pb-2 pt-1.5">
@@ -88,7 +92,6 @@ export function AccountMenu({ onReportIssue }: { onReportIssue: () => void }) {
 
         <div className="py-1">
           <button
-            role="menuitem"
             className={item}
             onClick={() => {
               close();
@@ -99,7 +102,6 @@ export function AccountMenu({ onReportIssue }: { onReportIssue: () => void }) {
             Report an issue
           </button>
           <button
-            role="menuitem"
             className={item}
             onClick={() => {
               close();
@@ -110,7 +112,6 @@ export function AccountMenu({ onReportIssue }: { onReportIssue: () => void }) {
             Settings
           </button>
           <button
-            role="menuitem"
             className={item}
             onClick={() => {
               close();

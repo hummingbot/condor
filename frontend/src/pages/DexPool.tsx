@@ -5,7 +5,7 @@ import {
   ChevronLeft,
   ChevronRight,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useNavigate, useParams } from "react-router-dom";
 
@@ -311,6 +311,7 @@ export function DexPool() {
   const showErrors = errorsFor === tab;
   const setShowErrors = (on: boolean) => setErrorsFor(on ? tab : null);
   const shown = <V extends { errors: string[] }>(v: V): V => (showErrors ? v : { ...v, errors: [] });
+  const formScrollRef = useRef<HTMLDivElement>(null);
   const currentPrice = pool?.current_price ?? null;
 
   /**
@@ -706,7 +707,7 @@ export function DexPool() {
             </p>
           )}
 
-          <div className="flex-1 overflow-y-auto" onInputCapture={() => setShowErrors(true)}>
+          <div ref={formScrollRef} className="flex-1 overflow-y-auto" onInputCapture={() => setShowErrors(true)}>
             {tab === "order" ? (
               <OrderConfigPanel
                 state={orderConfig.state}
@@ -751,6 +752,12 @@ export function DexPool() {
               onClick={() => {
                 if (!active.validation.valid) {
                   setShowErrors(true);
+                  // The messages sit at the foot of the form, which a short
+                  // window may have scrolled out of view (as on Trade).
+                  requestAnimationFrame(() => {
+                    const el = formScrollRef.current;
+                    el?.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+                  });
                   return;
                 }
                 createMutation.mutate();

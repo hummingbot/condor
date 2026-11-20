@@ -35,6 +35,7 @@ import {
 } from "@/lib/routineUtils";
 import { useViewFacts } from "@/lib/viewFacts";
 import { useServer } from "@/hooks/useServer";
+import { useIsPhone } from "@/hooks/useIsPhone";
 import { ReportFrame } from "./ReportFrame";
 import { RoutinePicker } from "./RoutinePicker";
 import {
@@ -133,6 +134,7 @@ export function ReportBrowser({
   // The page on a phone: the list or the report, never both squeezed side by
   // side (UX review, phone layout). Opens on the report when the URL named a
   // routine, otherwise on the list. Ignored from md up.
+  const isPhone = useIsPhone();
   const [phonePane, setPhonePane] = useState<"list" | "report">(
     initialSource ? "report" : "list",
   );
@@ -669,7 +671,9 @@ export function ReportBrowser({
           onScopeChange={changeScope}
           search={search}
           onSearchChange={setSearch}
-          compact={isCompact}
+          // On a phone the list fills the screen and has no expand button, so
+          // a rail collapsed at desktop width must not follow it down there.
+          compact={isCompact && !(page && isPhone)}
           onToggleCompact={() => setIsCompact((v) => !v)}
           onStopInstance={(id) => stopMutation.mutate(id)}
           stopping={stopMutation.isPending}
