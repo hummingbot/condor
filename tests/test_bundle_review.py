@@ -560,6 +560,7 @@ def test_the_shipped_library_carries_no_secret_at_all():
 #: was reaching for and the only one that can be green — a *new* host appearing
 #: in a shipped agent fails here, which is what a regression guard is for.
 LIBRARY_PUBLIC_HOSTS = {
+    "directional_trader": {"console.nace.ai"},
     "fundamental_analyst": {"api.llama.fi", "api.coingecko.com"},
     "market_making_expert": {"api.hyperliquid.xyz"},
 }
