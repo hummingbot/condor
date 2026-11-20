@@ -1087,6 +1087,10 @@ export function useChatSocket() {
   // meant from one that has gone stale (FU-03) — see `flushUnsent`.
   const unsent = useRef<QueuedFrame[]>([]);
   const MAX_UNSENT = 20;
+  // When the socket this hook had went away, or null while it is up (and
+  // before the first connect). What a queued instruction's age is measured
+  // from when it was typed *before* the drop — see `flushUnsent`.
+  const socketDownAt = useRef<number | null>(null);
 
   const send = useCallback(
     (
@@ -1133,13 +1137,22 @@ export function useChatSocket() {
    * would otherwise go out on `session_started` however old it was. Judging
    * them at the reconnect, not at the spawn, keeps a slow spawn on a live
    * socket from costing the user a prompt that never sat through an outage.
+   *
+   * The age that counts is the time spent *offline*, so the clock starts at
+   * whichever came later: the prompt being typed, or the socket going down. A
+   * prompt that had already waited a minute on a slow spawn when the socket
+   * blipped for a second was online for all but that second — measured from
+   * when it was typed it was thrown away as stale after any reconnect.
    */
   const flushUnsent = useCallback(
     (ws: WebSocket) => {
       const queued = unsent.current;
       unsent.current = [];
       const now = Date.now();
-      const isStale = (at: number) => now - at > QUEUED_FRAME_TTL_MS;
+      const downAt = socketDownAt.current;
+      socketDownAt.current = null;
+      const isStale = (at: number) =>
+        now - Math.max(at, downAt ?? at) > QUEUED_FRAME_TTL_MS;
       for (const { msg, at, slotId, messageId } of queued) {
         const stale = EXPIRING_ACTIONS.has(String(msg.action)) && isStale(at);
         if (!stale) ws.send(JSON.stringify(msg));
@@ -1268,6 +1281,9 @@ export function useChatSocket() {
     const ws = wsRef.current;
     wsRef.current = null;
     socketToken.current = null;
+    // Its `onclose` is ignored from here on (it is no longer the hook's
+    // socket), so this is where a socket closed on purpose is noted as down.
+    if (ws) socketDownAt.current ??= Date.now();
     ws?.close();
   }, []);
 
@@ -1319,6 +1335,8 @@ export function useChatSocket() {
       // socket may report the connection down or ask for another attempt.
       if (wsRef.current !== ws) return;
       setIsConnected(false);
+      // The first close of an outage, not each failed retry after it.
+      socketDownAt.current ??= Date.now();
       if (!shouldConnect.current) return;
       reconnectTimer.current = setTimeout(() => connect(), reconnectDelay.current);
       reconnectDelay.current = Math.min(

@@ -389,6 +389,65 @@ describe("the chat with its socket down (FU-03)", () => {
         expect.objectContaining({ action: "send_message", text: "hello" }),
       );
     });
+
+    /** A chat started on a live socket, with a prompt waiting on its spawn. */
+    async function typeIntoSlowSpawn(text: string) {
+      await open();
+      let ref = "";
+      act(() => {
+        ref = chat().startSession("k");
+      });
+      act(() => chat().sendMessage(ref, text));
+      await settle();
+      return ref;
+    }
+
+    function spawnAnswers(fresh: FakeSocket, ref: string) {
+      act(() => {
+        fresh.deliver({
+          event: "session_started",
+          slot_id: "s2",
+          conversation_id: "c2",
+          agent_key: "k",
+          client_ref: ref,
+        });
+      });
+    }
+
+    it("survives a socket blip after a long wait on a slow spawn", async () => {
+      const ref = await typeIntoSlowSpawn("hello");
+
+      // Online the whole time it waited: the age that counts starts at the drop.
+      now += QUEUED_FRAME_TTL_MS * 2;
+      drop();
+      now += 1_000;
+      const fresh = reconnect();
+      expect(newChat(ref).find((m) => m.role === "user")?.delivery).toBeUndefined();
+
+      spawnAnswers(fresh, ref);
+      await settle();
+
+      expect(fresh.sent).toContainEqual(
+        expect.objectContaining({ action: "send_message", text: "hello" }),
+      );
+    });
+
+    it("is still dropped when the outage itself outlasts the bound", async () => {
+      const ref = await typeIntoSlowSpawn("close my position");
+
+      now += 5_000;
+      drop();
+      now += QUEUED_FRAME_TTL_MS + 1;
+      const fresh = reconnect();
+      spawnAnswers(fresh, ref);
+      await settle();
+
+      expect(actions(fresh)).not.toContain("send_message");
+      expect(newChat("s2").find((m) => m.role === "user")).toMatchObject({
+        text: "close my position",
+        delivery: "unsent",
+      });
+    });
   });
 });
 
