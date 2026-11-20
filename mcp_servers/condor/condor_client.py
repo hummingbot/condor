@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import time
+from urllib.parse import quote, unquote
 
 import aiohttp
 
@@ -72,6 +73,40 @@ def _detail(status: int, text: str) -> str:
     return str(data)
 
 
+def path_segment(value: object) -> str:
+    """``value`` as exactly one segment of a main-API path, or refuse.
+
+    Ids reach these paths straight from tool arguments, i.e. from a model that
+    may be reading injected text. Interpolated raw, ``../settings/servers/x``
+    as an agent slug turned an agent delete into ``DELETE /settings/servers/x``:
+    the HTTP client collapses dot segments before the request leaves. One
+    segment means no separator and no dot segment; what is left is
+    percent-encoded so nothing in it is read as path syntax.
+    """
+    text = str(value)
+    if (
+        not text
+        or text in (".", "..")
+        or ".." in text
+        or any(ch in text for ch in ("/", "\\", "\0", "?", "#", "%"))
+    ):
+        raise APIError(f"Invalid id {text!r}")
+    return quote(text, safe="")
+
+
+def _refuse_traversal(path: str) -> None:
+    """Refuse a path that would resolve to another route (the backstop).
+
+    :func:`path_segment` is the fix at each call site; this catches the caller
+    that forgot it. Dot segments are checked decoded as well, because ``%2e%2e``
+    is normalised exactly as ``..`` is.
+    """
+    route = path.split("?", 1)[0]
+    for candidate in (route, unquote(route)):
+        if "\\" in candidate or any(seg in (".", "..") for seg in candidate.split("/")):
+            raise APIError(f"Refusing a main-API path with a dot segment: {path!r}")
+
+
 async def call_main_api(
     method: str, path: str, body: dict | None = None, timeout: float | None = None
 ) -> dict | list:
@@ -97,6 +132,7 @@ async def call_main_api(
     from condor.runtime.timeouts import TIMEOUTS
     from utils.config import WEB_PORT
 
+    _refuse_traversal(path)
     if timeout is None:
         timeout = TIMEOUTS.mcp_call
     url = f"http://127.0.0.1:{WEB_PORT}/api/v1{path}"

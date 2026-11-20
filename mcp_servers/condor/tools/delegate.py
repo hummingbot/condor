@@ -20,7 +20,7 @@ via the web API.
 """
 
 from condor.runtime.timeouts import ASK_TIMED_OUT_MARK, TIMEOUTS
-from mcp_servers.condor.condor_client import call_main_api
+from mcp_servers.condor.condor_client import call_main_api, path_segment
 from mcp_servers.condor.settings import caller_slug as _caller_slug
 from mcp_servers.condor.settings import settings
 
@@ -233,11 +233,15 @@ async def delegate(
     if action == "get":
         if not task_id:
             return {"error": "task_id is required for get"}
-        return await call_main_api("GET", f"/agents/delegations/{task_id}")
+        return await call_main_api(
+            "GET", f"/agents/delegations/{path_segment(task_id)}"
+        )
 
     if action == "stop":
         if not task_id:
             return {"error": "task_id is required for stop"}
-        return await call_main_api("POST", f"/agents/delegations/{task_id}/stop")
+        return await call_main_api(
+            "POST", f"/agents/delegations/{path_segment(task_id)}/stop"
+        )
 
     return {"error": f"Unknown action '{action}'. Use start | ask | list | get | stop."}

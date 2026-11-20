@@ -21,7 +21,7 @@ import shutil
 import time
 from pathlib import Path
 
-from mcp_servers.condor.condor_client import call_main_api
+from mcp_servers.condor.condor_client import call_main_api, path_segment
 from mcp_servers.condor.exceptions import APIError
 from mcp_servers.condor.settings import caller_slug, settings
 from mcp_servers.condor.tools._scope import ScopeError, UnknownAgent
@@ -411,7 +411,9 @@ async def _poll_until_done(instance_id: str) -> dict | None:
     delays = iter(_POLL_RAMP)
     while time.monotonic() < deadline:
         await asyncio.sleep(min(next(delays, _POLL_INTERVAL), _POLL_INTERVAL))
-        inst = await call_main_api("GET", f"/routines/instances/{instance_id}")
+        inst = await call_main_api(
+            "GET", f"/routines/instances/{path_segment(instance_id)}"
+        )
         if isinstance(inst, dict) and inst.get("status") != "running":
             return inst
     return None
@@ -660,7 +662,9 @@ async def run_async_routine(
 async def get_instance(instance_id: str) -> dict:
     """Read a run back: its status, and its result once it has finished."""
     try:
-        inst = await call_main_api("GET", f"/routines/instances/{instance_id}")
+        inst = await call_main_api(
+            "GET", f"/routines/instances/{path_segment(instance_id)}"
+        )
     except APIError as e:
         return {
             "error": f"Could not read instance '{instance_id}': {e}. Instances live "
@@ -746,7 +750,9 @@ async def start_routine(
 async def stop_routine(instance_id: str) -> dict:
     """Stop a running routine instance."""
     try:
-        await call_main_api("POST", f"/routines/instances/{instance_id}/stop")
+        await call_main_api(
+            "POST", f"/routines/instances/{path_segment(instance_id)}/stop"
+        )
     except APIError as e:
         return {"error": f"Could not stop instance '{instance_id}': {e}"}
     return {"stopped": True, "instance_id": instance_id}

@@ -5,7 +5,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from condor.fsutil import atomic_write_text
-from mcp_servers.condor.condor_client import agent_strategy_from_agent_id, call_main_api
+from mcp_servers.condor.condor_client import (
+    agent_strategy_from_agent_id,
+    call_main_api,
+    path_segment,
+)
 from mcp_servers.condor.exceptions import APIError, APITimeout
 from mcp_servers.condor.settings import settings
 
@@ -181,10 +185,14 @@ async def _delete_strategy(loop_id: str | None) -> dict:
     parts = split_key(loop_id)
     if not parts:
         return {"error": f"Invalid loop_id '{loop_id}'"}
+    # Each half must be one path segment before it is put in a URL: the HTTP
+    # client collapses ``..``, so an unchecked id addresses any DELETE route.
     try:
-        return await call_main_api(
-            "DELETE", f"/agents/{parts[0]}/strategies/{parts[1]}"
-        )
+        agent, strategy = path_segment(parts[0]), path_segment(parts[1])
+    except APIError:
+        return {"error": f"Invalid loop_id '{loop_id}'"}
+    try:
+        return await call_main_api("DELETE", f"/agents/{agent}/strategies/{strategy}")
     except APIError as exc:
         return {"error": str(exc)}
 
@@ -194,6 +202,14 @@ async def _delete_agent(agent_slug: str | None) -> dict:
     if not agent_slug:
         return {"error": "agent_slug is required"}
     from condor.agents.strategy import StrategyStore
+
+    # Before anything else, and before the URL below is built: ``StrategyStore
+    # .list`` answers ``[]`` for an unsafe id, so the loop check alone lets
+    # ``../settings/servers/x`` through to a DELETE on another route.
+    try:
+        segment = path_segment(agent_slug)
+    except APIError:
+        return {"error": f"Invalid agent id '{agent_slug}'"}
 
     # A read, so it stays local: the route would remove the loops with the
     # agent, and this tool has always made the caller delete them first.
@@ -206,7 +222,7 @@ async def _delete_agent(agent_slug: str | None) -> dict:
             )
         }
     try:
-        return await call_main_api("DELETE", f"/agents/{agent_slug}")
+        return await call_main_api("DELETE", f"/agents/{segment}")
     except APIError as exc:
         return {"error": str(exc)}
 
