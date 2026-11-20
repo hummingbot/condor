@@ -194,7 +194,11 @@ export function CreateExecutor() {
   const [browserOpen, setBrowserOpen] = useState(false);
   // Captured on the first render, before the effect below writes the current
   // market back to storage and makes every visit look like a returning one.
-  const coldStartRef = useRef(!searchParams.get("connector") && !hasRememberedMarket());
+  // A URL naming a venue or a pair is a choice, so it is never a cold start:
+  // switching venue under a linked pair would drop the pair it asked for.
+  const coldStartRef = useRef(
+    !searchParams.get("connector") && !searchParams.get("pair") && !hasRememberedMarket(),
+  );
   const [rightPanelWidth, setRightPanelWidth] = useState(288);
   const [bottomPaneHeight, setBottomPaneHeight] = useState(200);
   // The selection belongs to the market it was made in, so it carries that

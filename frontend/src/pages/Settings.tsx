@@ -128,7 +128,7 @@ export function Settings() {
   const tab = available ? requested : landing;
   // ...but silently is the wrong way to fall back when the product itself
   // sent the link. The "Updates available" notice links to ?tab=updates, so a
-  // non-admin seat clicks it, lands on Servers, and sees nothing happen at
+  // non-admin seat clicks it, lands on the default tab, and sees nothing happen at
   // all — the tab is gone, the notice is still there, and nothing anywhere
   // says why. Say why.
   const deniedTab =
