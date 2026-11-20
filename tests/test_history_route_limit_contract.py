@@ -121,4 +121,7 @@ def test_the_route_still_reports_a_real_connection_failure(monkeypatch):
     )
 
     assert body.server_online is False
-    assert "connection refused" in body.error_hint
+    # A hint, but never the exception's own text: on a real transport failure
+    # that string carries the backend's host and port (WR-09).
+    assert body.error_hint.startswith("Connection error")
+    assert "connection refused" not in body.error_hint

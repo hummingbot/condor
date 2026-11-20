@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 
 import { ShareConversation } from "@/components/chat/ShareConversation";
+import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { RAIL_OPEN_GROUPS_KEY } from "@/lib/sessionState";
 import { api, CHAT_SLUG, type AgentSummary, type ConversationMeta } from "@/lib/api";
 
@@ -126,6 +127,9 @@ export const ConversationList = memo(function ConversationList({
 }) {
   const queryClient = useQueryClient();
   const [renaming, setRenaming] = useState<string | null>(null);
+  // Through the shared Escape stack rather than the input's own keydown, so
+  // cancelling a rename does not also close whatever this list is shown in.
+  useEscapeKey(renaming !== null, () => setRenaming(null));
   const [draftTitle, setDraftTitle] = useState("");
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [sharing, setSharing] = useState<string | null>(null);
@@ -291,7 +295,6 @@ export const ConversationList = memo(function ConversationList({
             onChange={(e) => setDraftTitle(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter") commitRename(meta.id);
-              if (e.key === "Escape") setRenaming(null);
             }}
             className="w-full rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none"
           />

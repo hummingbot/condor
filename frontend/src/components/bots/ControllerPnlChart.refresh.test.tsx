@@ -74,7 +74,14 @@ function series(end: number, n: number): ControllerPerformanceSnapshot[] {
 }
 
 /** Serve a scripted list of history pages and record every URL requested. */
-function serve(bodies: { snapshots: ControllerPerformanceSnapshot[]; next_cursor?: string | null }[]) {
+function serve(
+  bodies: {
+    snapshots: ControllerPerformanceSnapshot[];
+    next_cursor?: string | null;
+    server_online?: boolean;
+    error_hint?: string;
+  }[],
+) {
   const urls: string[] = [];
   vi.stubGlobal(
     "fetch",
@@ -263,5 +270,85 @@ describe("ControllerPnlChart refresh traffic", () => {
     const first = params(urls[0]);
     expect(first.get("interval")).toBe("1h");
     expect(first.get("start_time")).toBe(deployedAt);
+  });
+});
+
+/**
+ * A failed history request is not a controller with no history (FP-10).
+ *
+ * The component read only `data` and `isLoading`, so a rejected request fell
+ * through to "No performance history available" — an API outage reading as a
+ * bot that never recorded anything.
+ */
+describe("ControllerPnlChart when the history request fails", () => {
+  const state = () => container.querySelector<HTMLElement>("[data-chart-state]");
+
+  it("says the load failed, and Retry asks again", async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new Error("upstream down");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await mount(new Date(NOW - 60 * MINUTE).toISOString());
+    for (let i = 0; i < 5 && state()?.dataset.chartState !== "error"; i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+    }
+
+    expect(state()?.dataset.chartState).toBe("error");
+    expect(container.textContent).toContain("Could not load this controller's performance history");
+    expect(container.textContent).not.toContain("No performance history available");
+
+    const before = fetchMock.mock.calls.length;
+    await act(async () => {
+      container.querySelector("button")!.click();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(before);
+  });
+
+  it("still says there is no history when the request answers with none", async () => {
+    serve([{ snapshots: [] }]);
+    await mount(new Date(NOW - 60 * MINUTE).toISOString());
+    for (let i = 0; i < 5 && state()?.dataset.chartState !== "empty"; i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+    }
+    expect(state()?.dataset.chartState).toBe("empty");
+  });
+
+  // The route reports an unreachable trading server in band — a 200 carrying
+  // `server_online: false` and no rows — so the query *resolves*. Reading only
+  // `isError` drew that outage as "No performance history available", with no
+  // way to ask again.
+  it("says the load failed when the server answered offline, and Retry asks again", async () => {
+    const urls = serve([
+      { snapshots: [], server_online: false, error_hint: "Connection error: unreachable" },
+      { snapshots: series(NOW, 3) },
+    ]);
+    await mount(new Date(NOW - 60 * MINUTE).toISOString());
+    for (let i = 0; i < 5 && state()?.dataset.chartState !== "error"; i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+    }
+
+    expect(state()?.dataset.chartState).toBe("error");
+    expect(container.textContent).toContain("Could not load this controller's performance history");
+    expect(container.textContent).toContain("Connection error: unreachable");
+    expect(container.textContent).not.toContain("No performance history available");
+
+    await act(async () => {
+      container.querySelector("button")!.click();
+    });
+    for (let i = 0; i < 5 && !container.querySelector("[data-chart]"); i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+    }
+    expect(urls).toHaveLength(2);
+    expect(container.querySelector("[data-chart]")).not.toBeNull();
   });
 });

@@ -11,7 +11,7 @@
  * what fills each slot. It is derived from, and drives, the same state the
  * tiles do, so the two can never disagree.
  */
-import { Bot, ChevronDown, Cpu, Radio, Repeat, Wallet, Zap, type LucideIcon } from "lucide-react";
+import { Bot, Brain, ChevronDown, Radio, Repeat, Wallet, Zap, type LucideIcon } from "lucide-react";
 import { useState } from "react";
 
 import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
@@ -21,9 +21,9 @@ import { isSide, type LayoutChoice, type MainSlot, type SideSlot, type SlotId } 
 export type { LayoutChoice, MainSlot, SideSlot, SlotId };
 
 const MAIN: { id: MainSlot; label: string; Icon: LucideIcon; hint: string }[] = [
-  { id: "agent", label: "Agent", Icon: Bot, hint: "What the agent knows and runs" },
+  { id: "agent", label: "Agent", Icon: Brain, hint: "What the agent knows and runs" },
   { id: "portfolio", label: "Portfolio", Icon: Wallet, hint: "Balances by asset and venue" },
-  { id: "execution", label: "Activity", Icon: Cpu, hint: "What is running: deployed controllers" },
+  { id: "execution", label: "Bots", Icon: Bot, hint: "What is running: deployed controllers" },
   { id: "loops", label: "Loops", Icon: Repeat, hint: "Live tick loops" },
 ];
 const SIDE: { id: SideSlot; label: string; Icon: LucideIcon; hint: string }[] = [

@@ -59,7 +59,13 @@ export interface ScopeOwner extends SeriesOwner {
 export function scopeOwners(
   scope: PerfNode,
   convert: ConvertQuote,
-  now: number,
+  /**
+   * Only `foldLeaves` wants it, for a runtime this function never reads: a
+   * line is its capital and its net, and neither moves with the clock. A
+   * caller that memoises the split should leave it out, or every clock tick
+   * hands the chart a new set of identical lines to fold (FP-11).
+   */
+  now: number = 0,
 ): ScopeOwner[] {
   if (scope.kind === "controller" || scope.kind === "executor") return [];
   const owners = scope.children

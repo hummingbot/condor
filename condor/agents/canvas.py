@@ -43,6 +43,8 @@ _REVISION_RE = re.compile(
     r"^- #(?P<tick>\d+) \| (?P<ts>[^|]+) \| (?P<section>\w+) \| (?P<text>.*)$"
 )
 
+_BODY_HEADING_RE = re.compile(r"^## ", re.MULTILINE)
+
 
 # ---------------------------------------------------------------------------
 # Reading
@@ -126,6 +128,10 @@ def write_section(
             f"on tick #{tick} — one revision per section is enough"
         }
 
+    # ``## `` is this file's own section delimiter: a body line that starts with
+    # it would parse back as another section and take the rest of the body with
+    # it on the next write. Demoted one level, before the cap is applied.
+    body = _BODY_HEADING_RE.sub("### ", body)
     truncated = len(body) > MAX_SECTION_CHARS
     if truncated:
         body = body[:MAX_SECTION_CHARS].rstrip()

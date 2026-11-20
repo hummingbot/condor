@@ -5,7 +5,7 @@ import { formatPositionPrice, quoteOf } from "@/components/agent/session/positio
 import { SessionPositions } from "@/components/agent/session/SessionPositions";
 import { ExecutorChart } from "@/components/charts/ExecutorChart";
 import { PairLabel } from "@/components/executor/PairLabel";
-import { DetailPanel, ExecutorTable, type SortDir, type SortKey } from "@/components/perf/ExecutorTable";
+import { ExecutorTable, LiveDetailPanel, type SortDir, type SortKey } from "@/components/perf/ExecutorTable";
 import { useAgentExecutors } from "@/hooks/useAgentExecutors";
 import { useRates } from "@/hooks/useRates";
 import { useSnapshotBubbles } from "@/hooks/useSnapshotBubbles";
@@ -120,9 +120,9 @@ export function SessionExecutors({
     queryFn: () => api.getSessionSnapshots(slug, sslug, sessionNum),
   });
 
-  // One query per snapshot body, shared with SnapshotDetail — see useSnapshotBubbles.
+  // Bodies are fetched on hover and shared with SnapshotDetail — see useSnapshotBubbles.
   const snapshotSummaries = useMemo(() => snapshotsData?.snapshots ?? [], [snapshotsData]);
-  const snapshotBubbles = useSnapshotBubbles(slug, sslug, sessionNum, snapshotSummaries);
+  const { bubbles: snapshotBubbles, loadPreview } = useSnapshotBubbles(slug, sslug, sessionNum, snapshotSummaries);
 
   // Group executors by connector:pair for charts
   const chartGroups = useMemo(
@@ -133,7 +133,8 @@ export function SessionExecutors({
   // Table state
   const [sortKey, setSortKey] = useState<SortKey>("timestamp");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
-  const [selectedExecutor, setSelectedExecutor] = useState<ExecutorInfo | null>(null);
+  // The id, not the clicked row: the panel reads the executor off each frame.
+  const [selectedExecutorId, setSelectedExecutorId] = useState<string | null>(null);
 
   // Positions held (filtered by controller IDs)
   const { data: positionsData } = useQuery({
@@ -237,6 +238,7 @@ export function SessionExecutors({
               height={500}
               snapshots={snapshotBubbles}
               onSnapshotClick={onSnapshotClick}
+              onSnapshotHover={loadPreview}
             />
           </div>
         );
@@ -249,8 +251,8 @@ export function SessionExecutors({
           sortKey={sortKey}
           sortDir={sortDir}
           onSort={handleSort}
-          onRowClick={(ex) => setSelectedExecutor(ex)}
-          selectedExecutorId={selectedExecutor?.id ?? null}
+          onRowClick={(ex) => setSelectedExecutorId(ex.id)}
+          selectedExecutorId={selectedExecutorId}
           rateFormatPnl={formatPnlValue}
           rateFormatValue={formatValue}
           rateFormatDetailed={formatValueDetailed}
@@ -258,11 +260,12 @@ export function SessionExecutors({
       )}
 
       {/* Executor Detail Panel */}
-      {!chartsOnly && selectedExecutor && (
-        <DetailPanel
-          executor={selectedExecutor}
+      {!chartsOnly && selectedExecutorId && (
+        <LiveDetailPanel
+          executorId={selectedExecutorId}
+          executors={executorInfos}
           server={serverName}
-          onClose={() => setSelectedExecutor(null)}
+          onClose={() => setSelectedExecutorId(null)}
           rateFormatPnl={formatPnlValue}
           rateFormatValue={formatValue}
           rateFormatDetailed={formatValueDetailed}

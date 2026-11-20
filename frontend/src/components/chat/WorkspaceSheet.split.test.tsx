@@ -91,8 +91,12 @@ async function render(props: Parameters<typeof Workspace>[0] = {}) {
   });
 }
 
-const outlet = () =>
+/** Where a split sheet portals to. */
+const host = () =>
   container.querySelector<HTMLElement>('aside[aria-label="Workspace pane"]');
+/** The pane's column: the host's wrapper, which is what hides and takes the
+ *  row's share since the design refresh moved both off the host itself. */
+const outlet = () => host()?.parentElement ?? null;
 const handle = () => container.querySelector<HTMLElement>('[role="separator"]');
 /** The pane's share of the row, as the flex ratio the outlet renders. */
 const grow = () => Number(outlet()!.style.flexGrow);
@@ -113,24 +117,39 @@ function stubLayout() {
   Object.defineProperty(HTMLElement.prototype, "offsetWidth", {
     configurable: true,
     get(this: HTMLElement) {
-      if (this.tagName === "ASIDE") return PANE_PX;
+      // The pane's column — the handle's sibling since the design refresh
+      // wrapped the host — or the host itself.
+      if (
+        this.tagName === "ASIDE" ||
+        this.firstElementChild?.getAttribute("aria-label") === "Workspace pane"
+      )
+        return PANE_PX;
       if (this.dataset.testid === "chat") return CHAT_PX;
       return 0;
     },
   });
   HTMLElement.prototype.getBoundingClientRect = () =>
-    ({ right: ROW_RIGHT, left: ROW_RIGHT - PANE_PX, width: PANE_PX }) as DOMRect;
+    ({
+      right: ROW_RIGHT,
+      left: ROW_RIGHT - PANE_PX,
+      width: PANE_PX,
+    }) as DOMRect;
 }
 
 /** Grab the handle and drag it to `clientX`, without letting go. */
 async function dragTo(clientX: number) {
   await act(async () => {
     handle()!.dispatchEvent(
-      new MouseEvent("mousedown", { bubbles: true, clientX: ROW_RIGHT - PANE_PX }),
+      new MouseEvent("mousedown", {
+        bubbles: true,
+        clientX: ROW_RIGHT - PANE_PX,
+      }),
     );
   });
   await act(async () => {
-    document.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX }));
+    document.dispatchEvent(
+      new MouseEvent("mousemove", { bubbles: true, clientX }),
+    );
   });
 }
 
@@ -182,7 +201,7 @@ describe("WorkspaceSheet beside a conversation", () => {
   it("opens in the pane, leaving the chat on screen", async () => {
     await render();
 
-    expect(outlet()!.contains(report())).toBe(true);
+    expect(host()!.contains(report())).toBe(true);
     // No overlay, so nothing is covering the transcript — and the composer is
     // still there to type in.
     expect(overlay()).toBeNull();
@@ -196,7 +215,7 @@ describe("WorkspaceSheet beside a conversation", () => {
     await render();
 
     expect(overlay()).toBeNull();
-    expect(outlet()!.contains(report())).toBe(true);
+    expect(host()!.contains(report())).toBe(true);
   });
 
   it("gives the pane width only while something is in it", async () => {
@@ -215,11 +234,11 @@ describe("WorkspaceSheet beside a conversation", () => {
 
     await click(button("Full screen")!);
     expect(overlay()).toBeTruthy();
-    expect(outlet()!.contains(report())).toBe(false);
+    expect(host()!.contains(report())).toBe(false);
 
     await click(button("Back beside the chat")!);
     expect(overlay()).toBeNull();
-    expect(outlet()!.contains(report())).toBe(true);
+    expect(host()!.contains(report())).toBe(true);
     // Nothing written down: the next report opens beside the chat again.
     expect(localStorage.getItem("condor_sheet_zen")).toBeNull();
   });
@@ -374,25 +393,25 @@ describe("Only one sheet can be in the pane", () => {
   it("leaves the second as an overlay, with the first still beside the chat", async () => {
     await render({ sheet: true, second: true });
 
-    expect(outlet()!.contains(report())).toBe(true);
+    expect(host()!.contains(report())).toBe(true);
     // The second is on screen, and it is not in the pane.
     expect(delegation()).toBeTruthy();
-    expect(outlet()!.contains(delegation())).toBe(false);
+    expect(host()!.contains(delegation())).toBe(false);
     expect(overlay()).toBeTruthy();
     // Exactly one thing portalled in, whatever else is mounted.
-    expect(outlet()!.children).toHaveLength(1);
+    expect(host()!.children).toHaveLength(1);
   });
 
   it("does not care which order they arrive in", async () => {
     // The delegation first this time: whoever finds the pane free keeps it,
     // and the report opened after it is the overlay.
     await render({ sheet: false, second: true });
-    expect(outlet()!.contains(delegation())).toBe(true);
+    expect(host()!.contains(delegation())).toBe(true);
 
     await render({ sheet: true, second: true });
-    expect(outlet()!.contains(delegation())).toBe(true);
-    expect(outlet()!.contains(report())).toBe(false);
-    expect(outlet()!.children).toHaveLength(1);
+    expect(host()!.contains(delegation())).toBe(true);
+    expect(host()!.contains(report())).toBe(false);
+    expect(host()!.children).toHaveLength(1);
   });
 
   /**
@@ -409,23 +428,23 @@ describe("Only one sheet can be in the pane", () => {
    */
   it("hands over in one frame, with no overlay in between", async () => {
     await render({ sheet: true, second: false });
-    expect(outlet()!.contains(report())).toBe(true);
+    expect(host()!.contains(report())).toBe(true);
 
     globalThis.IS_REACT_ACT_ENVIRONMENT = false;
     flushSync(() => root.render(<Workspace sheet={false} second />));
 
     expect(overlay()).toBeNull();
-    expect(outlet()!.contains(delegation())).toBe(true);
+    expect(host()!.contains(delegation())).toBe(true);
   });
 
   it("hands the pane on once the sheet holding it closes", async () => {
     await render({ sheet: true, second: true });
-    expect(outlet()!.contains(report())).toBe(true);
+    expect(host()!.contains(report())).toBe(true);
 
     await render({ sheet: false, second: true });
     // The pane is free again and the sheet still open takes it, rather than
     // the column collapsing with a delegation stranded in an overlay.
-    expect(outlet()!.contains(delegation())).toBe(true);
+    expect(host()!.contains(delegation())).toBe(true);
     expect(overlay()).toBeNull();
   });
 });

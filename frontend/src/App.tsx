@@ -1,6 +1,6 @@
 import { QueryClientProvider } from "@tanstack/react-query";
 import { useCallback, useState } from "react";
-import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
 
 import { EXECUTION_PATH } from "@/components/chat/accountPanels";
 import { AppShell } from "@/components/layout/AppShell";
@@ -20,13 +20,31 @@ import { DesignSystem } from "@/pages/DesignSystem";
 import { Dex } from "@/pages/Dex";
 import { DexPool } from "@/pages/DexPool";
 import { Login } from "@/pages/Login";
+import { NotFound } from "@/pages/NotFound";
 import { Portfolio } from "@/pages/Portfolio";
 import { Routines } from "@/pages/Routines";
 import { Settings } from "@/pages/Settings";
 
-function ProtectedRoute({ children }: { children: React.ReactNode }) {
+/**
+ * Sends a visitor without a session to the login, and remembers where they
+ * were going.
+ *
+ * The address used to be dropped, so a notification link or a bookmark opened
+ * without a session — or after one expired — landed on the home (FU-13).
+ * `Login` already honours a validated `?redirect=`; this is what fills it in.
+ */
+export function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuth();
-  if (!isAuthenticated) return <Navigate to="/login" replace />;
+  const { pathname, search, hash } = useLocation();
+  if (!isAuthenticated) {
+    const target = pathname + search + hash;
+    return (
+      <Navigate
+        to={target === "/" ? "/login" : `/login?redirect=${encodeURIComponent(target)}`}
+        replace
+      />
+    );
+  }
   return <>{children}</>;
 }
 
@@ -43,8 +61,10 @@ function ServerProvider({ children }: { children: React.ReactNode }) {
     () => localStorage.getItem(SERVER_KEY),
   );
   const handleSetServer = useCallback(
-    (next: string) => {
-      localStorage.setItem(SERVER_KEY, next);
+    (next: string | null) => {
+      // `null` is the selection being dropped: the server it named is gone.
+      if (next === null) localStorage.removeItem(SERVER_KEY);
+      else localStorage.setItem(SERVER_KEY, next);
       setServer(next);
       // Only the two servers involved are touched, and nothing is refetched
       // here: `AppShell` renders `<Outlet key={server}>`, so the switch already
@@ -151,6 +171,10 @@ export default function App() {
                 <Route path="/settings" element={<Settings />} />
                 {import.meta.env.DEV && <Route path="/_design" element={<DesignSystem />} />}
                 <Route path="/market" element={<Navigate to="/trade" replace />} />
+                {/* Inside the shell on purpose: a mistyped address used to
+                    match nothing and render a blank page, without even the
+                    nav to leave it by (FU-13). */}
+                <Route path="*" element={<NotFound />} />
               </Route>
             </Routes>
           </BrowserRouter>

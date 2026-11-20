@@ -99,7 +99,14 @@ const REFUSED_STATUSES = new Set([
   "error",
 ]);
 
-/** Classify an ACP tool-call status into the three states the UI renders.
+/** A call that was still in flight when the user stopped or redirected its
+ *  turn (FU-06). Never on the wire or on disk — the chat's settle pass writes
+ *  it — and deliberately its own state: the call is over as far as this
+ *  transcript will ever hear, but whether it went through is not known, so it
+ *  must read as neither a success nor a call still running. */
+export const INTERRUPTED_STATUS = "interrupted";
+
+/** Classify an ACP tool-call status into the states the UI renders.
  *
  *  The wire vocabulary is `pending | in_progress | completed | failed` — it
  *  comes straight off the ACP `tool_call`/`tool_call_update` stream (see the
@@ -108,8 +115,11 @@ const REFUSED_STATUSES = new Set([
  *  that is neither terminally done nor terminally refused is still in flight —
  *  and "still in flight" is a claim the rest of the UI acts on, so a status
  *  that means the call is over must never fall through to it. */
-export function toolCallState(status: string): "ok" | "error" | "pending" {
+export function toolCallState(
+  status: string,
+): "ok" | "error" | "pending" | "interrupted" {
   if (status === "completed") return "ok";
+  if (status === INTERRUPTED_STATUS) return "interrupted";
   if (status === "failed" || REFUSED_STATUSES.has(status)) return "error";
   return "pending";
 }

@@ -114,3 +114,37 @@ def test_the_runtime_is_never_reloaded():
     """
     names = [*main._EXTRA_RELOAD_MODULES, *main._discover_handler_modules()]
     assert not [n for n in names if n.startswith("condor.runtime")]
+
+
+def test_config_manager_is_never_reloaded(monkeypatch):
+    """config_manager owns the singleton and its pooled API clients (XC-05).
+
+    Re-executing it reset ``ConfigManager._instance``: the next caller built a
+    second manager with an empty pool while stream tasks kept the first, whose
+    clients teardown then never closed.
+    """
+    import config_manager
+
+    names = [*main._EXTRA_RELOAD_MODULES, *main._discover_handler_modules()]
+    assert "config_manager" not in names
+
+    reloaded = []
+    monkeypatch.setattr(
+        main.importlib, "reload", lambda module: reloaded.append(module.__name__)
+    )
+    before = config_manager.ConfigManager._instance
+    main.reload_handlers()
+
+    assert reloaded, "the reload walked nothing — the recorder is not wired in"
+    assert "config_manager" not in reloaded
+    assert config_manager.ConfigManager._instance is before
+
+
+def test_the_watcher_is_on_unless_switched_off(monkeypatch):
+    monkeypatch.delenv(main.HOT_RELOAD_ENV, raising=False)
+    assert main.hot_reload_enabled() is True
+    for off in ("0", "false", "OFF", " no "):
+        monkeypatch.setenv(main.HOT_RELOAD_ENV, off)
+        assert main.hot_reload_enabled() is False
+    monkeypatch.setenv(main.HOT_RELOAD_ENV, "1")
+    assert main.hot_reload_enabled() is True

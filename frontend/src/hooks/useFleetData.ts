@@ -1,4 +1,9 @@
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import {
+  infiniteQueryOptions,
+  queryOptions,
+  useInfiniteQuery,
+  useQuery,
+} from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { useRates } from "@/hooks/useRates";
@@ -32,6 +37,7 @@ import {
 import { samplingIntervalSince } from "@/lib/pnl-chart";
 import { controllerPerfHistoryAllQuery } from "@/lib/queryClient";
 import type { ConvertFn } from "@/lib/rates";
+import { foldExecutorsIntoPages } from "@/lib/shared-socket";
 
 const BOTS_WS_CHANNELS = ["bots", "controller_perf"];
 
@@ -45,6 +51,58 @@ const BOTS_WS_CHANNELS = ["bots", "controller_perf"];
  */
 const EXECUTOR_PAGE_SIZE = 500;
 const EXECUTOR_PAGES = 4;
+
+/**
+ * How often the head of the executor walk is re-read (FD-04).
+ *
+ * The walk used to refetch itself every minute, and an infinite query refetch
+ * replays *every* loaded page: four sequential 500-row requests a minute (more
+ * after "load more") to refresh a list the socket already upserts on each
+ * frame. The socket is now what keeps it live, a reconnect is what repairs a
+ * gap (`shared-socket.ts`), and this one-page poll is the net under both.
+ */
+const EXECUTOR_HEAD_REFETCH_MS = 60_000;
+
+/**
+ * The executor walk the fleet browser pages through.
+ *
+ * No `refetchInterval` on purpose — see `EXECUTOR_HEAD_REFETCH_MS`.
+ */
+export function executorsInfiniteQuery(server: string | null) {
+  return infiniteQueryOptions({
+    queryKey: ["executors-infinite", server],
+    initialPageParam: "" as string,
+    queryFn: ({ pageParam }) =>
+      api.getExecutorsPage(server!, { cursor: pageParam || undefined, limit: EXECUTOR_PAGE_SIZE }),
+    getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
+    refetchOnWindowFocus: false,
+  });
+}
+
+/**
+ * The safety net under the socket: the newest page only, folded into the walk
+ * by id rather than refetching it.
+ *
+ * It repairs what a silently missed frame would otherwise leave wrong until
+ * the next reconnect — above all an executor still drawn as running after its
+ * terminal frame was lost. Seeded as fresh, so mounting it does not repeat the
+ * page-0 request the walk has just made; the data is only a row count, the
+ * rows themselves live in the walk's cache.
+ */
+export function executorsHeadQuery(server: string | null) {
+  return queryOptions({
+    queryKey: ["executors-head", server],
+    queryFn: async () => {
+      const page = await api.getExecutorsPage(server!, { limit: EXECUTOR_PAGE_SIZE });
+      foldExecutorsIntoPages(server!, page.executors ?? []);
+      return page.executors?.length ?? 0;
+    },
+    initialData: 0,
+    staleTime: EXECUTOR_HEAD_REFETCH_MS,
+    refetchInterval: EXECUTOR_HEAD_REFETCH_MS,
+    refetchOnWindowFocus: false,
+  });
+}
 
 /** Held still, so a failed or pending fleet map is not a new prop every render. */
 const EMPTY_OWNERS: FleetOwner[] = [];
@@ -81,6 +139,8 @@ export interface FleetData {
   hygiene: ExecutorHygiene;
   /** Display-currency conversion over every quote on screen. */
   convert: ConvertFn;
+  /** The rate table has not answered yet: `convert` cannot convert anything. */
+  ratesLoading: boolean;
   currencySymbol: string;
   rateFormatPnl: (val: number, quote: string) => string;
   rateFormatValue: (val: number, quote: string) => string;
@@ -295,16 +355,8 @@ export function useFleetData(
     fetchNextPage,
     hasNextPage,
     isFetchingNextPage,
-  } = useInfiniteQuery({
-    queryKey: ["executors-infinite", server],
-    enabled: on,
-    initialPageParam: "" as string,
-    queryFn: ({ pageParam }) =>
-      api.getExecutorsPage(server!, { cursor: pageParam || undefined, limit: EXECUTOR_PAGE_SIZE }),
-    getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
-    refetchInterval: 60_000, // Slow fallback only — WS handles real-time updates
-    refetchOnWindowFocus: false,
-  });
+  } = useInfiniteQuery({ ...executorsInfiniteQuery(server), enabled: on });
+  useQuery({ ...executorsHeadQuery(server), enabled: on });
 
   // Progressive loading: ask for the next chunk as soon as the current arrives,
   // up to the cap the reader has allowed.
@@ -372,6 +424,7 @@ export function useFleetData(
     formatValue,
     formatValueDetailed,
     resolvedSymbol: currencySymbol,
+    isLoading: ratesLoading,
   } = useRates(quoteCurrencies);
 
   return {
@@ -388,6 +441,7 @@ export function useFleetData(
     diagnostics: fleet?.diagnostics ?? UNKNOWN_DIAGNOSTICS,
     hygiene: data?.executor_hygiene ?? UNKNOWN_EXECUTOR_HYGIENE,
     convert,
+    ratesLoading,
     currencySymbol,
     rateFormatPnl: formatPnlValue,
     rateFormatValue: formatValue,

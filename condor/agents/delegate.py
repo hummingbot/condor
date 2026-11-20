@@ -74,6 +74,7 @@ from condor.agents.run_records import (
     TERMINAL_STATES,
     record_run,
 )
+from condor.fsutil import atomic_write_text
 from condor.runtime.wake import (  # noqa: F401 - re-exported, see ON_COMPLETE below
     ON_COMPLETE_CHOICES,
     ON_COMPLETE_NOTIFY,
@@ -877,9 +878,10 @@ def _persist_transcript(dt: DelegateTask) -> None:
         f"## {'Error' if dt.status == 'error' else 'Result'}\n\n"
         f"{body or '(none)'}\n"
     )
-    (record_dir / DELEGATION_TRANSCRIPT_FILENAME).write_text(content)
-    (record_dir / DELEGATION_EVENTS_FILENAME).write_text(
-        json.dumps({"events": events_for_wire(dt.events)}, indent=2)
+    atomic_write_text(record_dir / DELEGATION_TRANSCRIPT_FILENAME, content)
+    atomic_write_text(
+        record_dir / DELEGATION_EVENTS_FILENAME,
+        json.dumps({"events": events_for_wire(dt.events)}, indent=2),
     )
 
 

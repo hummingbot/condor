@@ -120,7 +120,8 @@ async def get_connected_exchanges(
 async def get_venues(name: str, user: WebUser = Depends(require_server_access)):
     """Venues the trade panel can offer, each with its independent traits.
 
-    ``{"venues": [{"name", "hummingbot_market_data", "clmm_lp", "credentialed"},
+    ``{"venues": [{"name", "hummingbot_market_data", "clmm_lp", "gecko_candles",
+    "credentialed"},
     ...]}``, over the union of the credentialed connectors, the candle-capable
     connectors and the chartable Gateway networks. The panel maps traits to UI
     decisions itself — which tabs and strategies to render is a product decision,
@@ -133,6 +134,9 @@ async def get_venues(name: str, user: WebUser = Depends(require_server_access)):
       time — they degrade per endpoint, so consumers still tolerate an empty one.
     - ``clmm_lp``: the venue is a Gateway network whose chain hosts a CLMM venue,
       so an LP position can actually be opened on it.
+    - ``gecko_candles``: the venue's candles are polled from GeckoTerminal rather
+      than streamed by the exchange, so a chart of it is legitimately quiet for
+      longer before its feed counts as stalled.
     - ``credentialed``: the venue reached the list from a trading source — account
       credentials or a configured Gateway — rather than from the candle list alone.
       False means read-only: chart and browse it, but do not offer to trade it.

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -140,11 +141,10 @@ def test_an_unreadable_stamp_is_no_basis(installed):
 
 def test_a_hub_updates_version_is_the_hubs_own_not_the_bundles(hub_installed):
     """CORR-1019: a hub update's ``version``/``installed_version`` stay the
-    bundle's own internal counters — ``older_bundle`` and
-    ``same_version_new_build`` above compare bundles by exactly those — but
-    ``hub_version``/``installed_hub_version`` are the separate number the
-    operator actually sees on Botcamp, which can move independently of the
-    bundle's own lineage.
+    bundle's own internal counters, but ``hub_version``/``installed_hub_version``
+    are the separate number the operator actually sees on Botcamp, which can
+    move independently of the bundle's own lineage — and which is the one
+    ``older_bundle``/``same_version_new_build`` order a hub update by (AG2-09).
     """
     plan = ab.plan_update(_newer(), "drifter", hub_reviewed=True, hub_version=9)
     assert plan.version == 2
@@ -165,6 +165,25 @@ def test_a_plain_file_updates_hub_version_is_zero(installed):
     assert plan.hub_reviewed is False
     assert plan.hub_version == 0
     assert plan.installed_hub_version == 0
+
+
+def test_a_plain_file_update_keeps_the_hub_provenance_on_the_stamp(hub_installed):
+    """AG2-08: ``apply_update`` wrote a fresh stamp, resetting every ``hub_*``
+    field, so a hub-installed agent that took one file update dropped out of
+    Botcamp tracking (no delisted warning, hub version 0)."""
+    before = ab.read_stamp(hub_installed)
+
+    ab.apply_update(ab.plan_update(_newer(), "drifter"), user_id=7)
+
+    after = ab.read_stamp(hub_installed)
+    assert after.version == 2
+    assert after.digests != before.digests
+    for field in ("hub_slug", "hub_version", "hub_digest", "hub_status", "hub_seen"):
+        assert getattr(after, field) == getattr(before, field), field
+    assert after.hub_checked_at == before.hub_checked_at
+    assert after.hub_slug == "drifter" and after.hub_version == 4
+    # …which is what makes the next plan's installed hub number correct.
+    assert ab.plan_update(_newer(), "drifter").installed_hub_version == 4
 
 
 # ── Blockers ──
@@ -218,15 +237,90 @@ def test_an_older_bundle_blocks_and_an_equal_version_only_warns(installed):
     assert same.counts == {"changed": 1, "unchanged": 2}
 
 
+def _hub_build(body: str) -> ab.Bundle:
+    """A zip-derived hub bundle: ``botcamp_import`` always stamps version 1."""
+    return _bundle(
+        version=1,
+        files=[
+            _file("AGENT.md", AGENT_MD.format(body=body)),
+            _file("skills/recon/SKILL.md", SKILL_MD.format(slug="recon", body="Look.")),
+            _file("routines/scan.py", ROUTINE_PY.format(body="v1")),
+        ],
+    )
+
+
+def test_a_hub_update_is_ordered_by_the_listing_version(hub_installed):
+    """AG2-09: every zip-derived bundle says version 1, so comparing the
+    bundle's own counter made every legitimate hub update warn
+    ``same_version_new_build``. The hub's lineage is the listing version.
+    """
+    newer = ab.plan_update(
+        _hub_build("Travel further."), "drifter", hub_reviewed=True, hub_version=5
+    )
+    assert newer.blockers == []
+    assert newer.warnings == []
+    assert newer.counts == {"changed": 1, "unchanged": 2}
+
+    ab.apply_update(newer, user_id=7)
+    ab.record_hub_install("drifter", hub_slug="drifter", hub_version=5, digest="e" * 64)
+
+    older = ab.plan_update(
+        _hub_build("Travel."), "drifter", hub_reviewed=True, hub_version=4
+    )
+    assert [b.code for b in older.blockers] == ["older_bundle"]
+    assert "Botcamp version 4" in older.blockers[0].message
+    assert "Botcamp version 5" in older.blockers[0].message
+
+    rebuild = ab.plan_update(
+        _hub_build("Travel elsewhere."), "drifter", hub_reviewed=True, hub_version=5
+    )
+    assert rebuild.blockers == []
+    assert [w.code for w in rebuild.warnings] == ["same_version_new_build"]
+
+
+def test_a_file_bundle_taken_in_between_does_not_block_hub_updates(hub_installed):
+    """The bundle's own counter (always 1 from the hub) is not compared against
+    a file bundle's version 3 — that blocked hub updates forever (AG2-09)."""
+    ab.apply_update(ab.plan_update(_bundle(version=3), "drifter"), user_id=7)
+
+    plan = ab.plan_update(
+        _hub_build("Travel further."), "drifter", hub_reviewed=True, hub_version=5
+    )
+    assert plan.blockers == []
+
+
 def test_a_live_loop_blocks_and_no_engine_does_not(installed, monkeypatch):
     assert ab.plan_update(_bundle(version=2), "drifter").blockers == []
 
+    # The registry is keyed by the engine's own ``agent_id`` —
+    # ``{agent}.{strategy}_{N}`` — never by the bare agent slug (AG2-03), so the
+    # fake registers the way ``LoopSupervisor`` does.
+    engines: dict[str, object] = {}
     monkeypatch.setattr(
-        "condor.agents.engine.get_engine", lambda slug: object(), raising=True
+        "condor.agents.engine.get_all_engines", lambda: dict(engines), raising=True
+    )
+
+    # Another agent's loop is not this agent's — not even one whose slug this
+    # one prefixes.
+    engines["drifter_two.grid_1"] = SimpleNamespace(
+        agent_id="drifter_two.grid_1", agent=SimpleNamespace(slug="drifter_two")
+    )
+    assert ab.plan_update(_bundle(version=2), "drifter").blockers == []
+
+    engines["drifter.grid_3"] = SimpleNamespace(
+        agent_id="drifter.grid_3", agent=SimpleNamespace(slug="drifter")
     )
     plan = ab.plan_update(_bundle(version=2), "drifter")
     assert [b.code for b in plan.blockers] == ["live_loop"]
     assert "running" in plan.blockers[0].message
+
+
+def test_an_unreachable_supervisor_does_not_block_a_preview(installed, monkeypatch):
+    def _boom():
+        raise RuntimeError("supervisor mid-import")
+
+    monkeypatch.setattr("condor.agents.engine.get_all_engines", _boom, raising=True)
+    assert ab.plan_update(_bundle(version=2), "drifter").blockers == []
 
 
 def test_an_agent_that_is_not_installed_blocks():

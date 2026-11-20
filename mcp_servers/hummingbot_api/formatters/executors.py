@@ -9,13 +9,15 @@ from typing import Any
 
 from .base import (
     format_currency,
-    format_number,
+    format_exact,
     format_percentage,
     format_table_separator,
     format_timestamp,
+    format_usd,
     get_field,
     truncate_string,
 )
+from .table_builder import render_table
 
 
 def format_executor_types_table(executor_types: list[dict[str, Any]]) -> str:
@@ -61,11 +63,32 @@ def format_executor_types_table(executor_types: list[dict[str, Any]]) -> str:
     return f"{header}\n{separator}\n" + "\n".join(rows)
 
 
+EXECUTOR_COLUMNS = [
+    "id",
+    "type",
+    "connector",
+    "pair",
+    "status",
+    "close_type",
+    "side",
+    "controller_id",
+    "account",
+    "volume",
+    "pnl",
+    "created",
+]
+
+
 def format_executors_table(executors: list[dict[str, Any]]) -> str:
     """
     Format a list of executors as a table.
 
-    Columns: id | type | connector | pair | status | side | volume | pnl | created
+    Columns: id | type | connector | pair | status | close_type | side |
+    controller_id | account | volume | pnl | created
+
+    ``controller_id`` is the owner the list tool's docstring promises ("under
+    which controller"), and the only way a session tells its own executors from
+    another agent's.
 
     Args:
         executors: List of executor dictionaries
@@ -76,49 +99,65 @@ def format_executors_table(executors: list[dict[str, Any]]) -> str:
     if not executors:
         return "No executors found."
 
-    # Header
-    header = "id                                           | type            | connector         | pair       | status     | close_type           | side | volume      | pnl       | created"
-    separator = format_table_separator(210)
-
-    # Format each executor as a row
     rows = []
     for executor in executors:
-        exec_id = str(get_field(executor, "id", "executor_id", default=""))
-        exec_type = str(
-            get_field(executor, "type", "executor_type", default="unknown")
-        )[:15]
-        connector = str(get_field(executor, "connector_name", default=""))[:17]
-        trading_pair = str(get_field(executor, "trading_pair", default=""))[:10]
-        status = str(get_field(executor, "status", default="unknown"))
-        close_type = str(get_field(executor, "close_type", default="") or "")
+        config = executor.get("config")
+        config = config if isinstance(config, dict) else {}
+        custom_info = executor.get("custom_info")
+        custom_info = custom_info if isinstance(custom_info, dict) else {}
 
         # Get side from top level or from custom_info
-        side = get_field(executor, "side", default=None)
-        if not side:
-            custom_info = executor.get("custom_info", {})
-            side = custom_info.get("side", "") if custom_info else ""
-        side = str(side)[:4] if side else ""
+        side = get_field(executor, "side", default=None) or custom_info.get("side")
 
-        # Volume is filled_amount_quote
-        volume = format_number(
-            get_field(executor, "filled_amount_quote", default=None),
-            decimals=2,
-            compact=True,
+        rows.append(
+            [
+                get_field(executor, "id", "executor_id", default=None),
+                get_field(executor, "type", "executor_type", default="unknown"),
+                get_field(executor, "connector_name", default=None)
+                or config.get("connector_name"),
+                get_field(executor, "trading_pair", default=None)
+                or config.get("trading_pair"),
+                get_field(executor, "status", default="unknown"),
+                get_field(executor, "close_type", default=None),
+                side,
+                get_field(executor, "controller_id", default=None)
+                or config.get("controller_id"),
+                get_field(executor, "account_name", "account", default=None),
+                # Volume is filled_amount_quote
+                format_usd(get_field(executor, "filled_amount_quote", default=None)),
+                format_usd(get_field(executor, "net_pnl_quote", "pnl", default=None)),
+                format_timestamp(
+                    get_field(executor, "timestamp", "created_at", default=0)
+                ),
+            ]
         )
-        pnl = format_number(
-            get_field(executor, "net_pnl_quote", "pnl", default=None),
-            decimals=2,
-            compact=False,
+
+    return render_table(EXECUTOR_COLUMNS, rows)
+
+
+#: A list this long or shorter is printed whole in an executor's detail. A DCA
+#: ladder's ``prices`` and ``amounts_quote`` ARE the executor; "[3 items]" told
+#: the reader nothing about what it had deployed.
+INLINE_LIST_MAX_ITEMS = 20
+
+
+def _format_list(values: list[Any]) -> str:
+    """A list value for the detail view: whole when short, else head and count."""
+
+    def render(value: Any) -> str:
+        return (
+            format_exact(value)
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+            else str(value)
         )
 
-        created = format_timestamp(
-            get_field(executor, "timestamp", "created_at", default=0)
-        )
-
-        row = f"{exec_id:44} | {exec_type:15} | {connector:17} | {trading_pair:10} | {status:10} | {close_type:20} | {side:4} | {volume:>11} | {pnl:>9} | {created}"
-        rows.append(row)
-
-    return f"{header}\n{separator}\n" + "\n".join(rows)
+    if len(values) <= INLINE_LIST_MAX_ITEMS:
+        return "[" + ", ".join(render(value) for value in values) + "]"
+    head = ", ".join(render(value) for value in values[:INLINE_LIST_MAX_ITEMS])
+    return (
+        f"[{head}, ... {len(values) - INLINE_LIST_MAX_ITEMS} more "
+        f"({len(values)} items)]"
+    )
 
 
 def format_executor_detail(executor: dict[str, Any]) -> str:
@@ -171,17 +210,15 @@ def format_executor_detail(executor: dict[str, Any]) -> str:
 
         break_even = custom_info.get("break_even_price")
         if break_even is not None:
-            output += f"Break-even Price: {format_number(break_even, decimals=2, compact=False)}\n"
+            output += f"Break-even Price: {format_exact(break_even)}\n"
 
     entry_price = get_field(executor, "entry_price", default=None)
     if entry_price is not None and entry_price != "N/A":
-        output += (
-            f"Entry Price: {format_number(entry_price, decimals=6, compact=False)}\n"
-        )
+        output += f"Entry Price: {format_exact(entry_price)}\n"
 
     current_price = get_field(executor, "current_price", default=None)
     if current_price is not None and current_price != "N/A":
-        output += f"Current Price: {format_number(current_price, decimals=6, compact=False)}\n"
+        output += f"Current Price: {format_exact(current_price)}\n"
 
     output += "\n"
 
@@ -234,7 +271,7 @@ def format_executor_detail(executor: dict[str, Any]) -> str:
         output += "\nConfig:\n"
         for key, value in config.items():
             if isinstance(value, list):
-                output += f"  {key}: [{len(value)} items]\n"
+                output += f"  {key}: {_format_list(value)}\n"
             else:
                 output += f"  {key}: {value}\n"
 
@@ -244,8 +281,8 @@ def format_executor_detail(executor: dict[str, Any]) -> str:
         grid_tp = custom_info.get("grid_tp_prices")
         if isinstance(grid_levels, list) and len(grid_levels) > 1:
             output += "\nGrid Config (derived from level prices):\n"
-            output += f"  start_price: {format_number(min(grid_levels), decimals=2, compact=False)}\n"
-            output += f"  end_price: {format_number(max(grid_levels), decimals=2, compact=False)}\n"
+            output += f"  start_price: {format_exact(min(grid_levels))}\n"
+            output += f"  end_price: {format_exact(max(grid_levels))}\n"
             output += f"  num_levels: {len(grid_levels)}\n"
             sorted_levels = sorted(grid_levels)
             spreads = [
@@ -266,7 +303,7 @@ def format_executor_detail(executor: dict[str, Any]) -> str:
         for key, value in custom_info.items():
             if isinstance(value, (list, dict)):
                 if isinstance(value, list):
-                    output += f"  {key}: [{len(value)} items]\n"
+                    output += f"  {key}: {_format_list(value)}\n"
                 else:
                     output += f"  {key}: {{...}} ({len(value)} keys)\n"
             else:
@@ -275,11 +312,27 @@ def format_executor_detail(executor: dict[str, Any]) -> str:
     return output
 
 
+POSITIONS_HELD_COLUMNS = [
+    "connector",
+    "trading_pair",
+    "side",
+    "amount",
+    "notional",
+    "entry_price",
+    "current_price",
+    "unrealized_pnl",
+    "leverage",
+    "controller_id",
+    "account",
+]
+
+
 def format_positions_held_table(positions: list[dict[str, Any]]) -> str:
     """
     Format positions held by executors as a table.
 
-    Columns: connector | trading_pair | side | amount | entry_price | current_price | unrealized_pnl | leverage
+    Columns: connector | trading_pair | side | amount | notional | entry_price |
+    current_price | unrealized_pnl | leverage | controller_id | account
 
     Args:
         positions: List of position dictionaries
@@ -290,25 +343,14 @@ def format_positions_held_table(positions: list[dict[str, Any]]) -> str:
     if not positions:
         return "No positions held."
 
-    # Header
-    header = "connector           | trading_pair | side | amount       | notional     | entry_price  | current_price | unrealized_pnl | leverage"
-    separator = format_table_separator(145)
-
-    # Format each position as a row
     rows = []
     for position in positions:
-        connector = str(get_field(position, "connector_name", default=""))[:19]
-        trading_pair = str(get_field(position, "trading_pair", default=""))[:12]
-        # Handle both 'side' and 'position_side' field names
-        side = str(get_field(position, "position_side", "side", default=""))[:4]
         # Handle both 'amount' and 'net_amount_base' field names
         amount_val = get_field(position, "net_amount_base", "amount", default=None)
-        amount = format_number(amount_val, decimals=6, compact=False)
         # Handle both 'entry_price' and 'buy_breakeven_price' field names
         entry_price_val = get_field(
             position, "buy_breakeven_price", "entry_price", default=None
         )
-        entry_price = format_number(entry_price_val, decimals=4, compact=False)
         # Compute notional value (amount * entry_price)
         notional_val = None
         if amount_val is not None and entry_price_val is not None:
@@ -316,23 +358,29 @@ def format_positions_held_table(positions: list[dict[str, Any]]) -> str:
                 notional_val = abs(float(amount_val)) * float(entry_price_val)
             except (ValueError, TypeError):
                 pass
-        notional = format_number(notional_val, decimals=2, compact=False)
-        current_price = format_number(
-            get_field(position, "current_price", default=None),
-            decimals=4,
-            compact=False,
-        )
-        unrealized_pnl = format_number(
-            get_field(position, "unrealized_pnl_quote", "unrealized_pnl", default=None),
-            decimals=2,
-            compact=False,
-        )
-        leverage = str(get_field(position, "leverage", default="1"))[:8]
 
-        row = f"{connector:19} | {trading_pair:12} | {side:4} | {amount:>12} | {notional:>12} | {entry_price:>12} | {current_price:>13} | {unrealized_pnl:>14} | {leverage:>8}"
-        rows.append(row)
+        rows.append(
+            [
+                get_field(position, "connector_name", default=None),
+                get_field(position, "trading_pair", default=None),
+                # Handle both 'side' and 'position_side' field names
+                get_field(position, "position_side", "side", default=None),
+                format_exact(amount_val),
+                format_usd(notional_val),
+                format_exact(entry_price_val),
+                format_exact(get_field(position, "current_price", default=None)),
+                format_usd(
+                    get_field(
+                        position, "unrealized_pnl_quote", "unrealized_pnl", default=None
+                    )
+                ),
+                get_field(position, "leverage", default="1"),
+                get_field(position, "controller_id", default=None),
+                get_field(position, "account_name", "account", default=None),
+            ]
+        )
 
-    return f"{header}\n{separator}\n" + "\n".join(rows)
+    return render_table(POSITIONS_HELD_COLUMNS, rows)
 
 
 def format_positions_summary(summary: dict[str, Any]) -> str:

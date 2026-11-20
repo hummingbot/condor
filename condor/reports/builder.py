@@ -129,6 +129,9 @@ class ReportBuilder:
         still holds a plain SVG figure. Pass ``optimize=False`` when the report
         needs the figure serialized exactly as built.
         """
+        from condor.plotly_compat import ensure_plotly_templates_patched
+
+        ensure_plotly_templates_patched()
         if optimize:
             import plotly.io as pio
 
@@ -471,7 +474,7 @@ class ReportBuilder:
 
         async with store._index_lock:
             if report_id is not None:
-                entries = store._read_index()
+                entries = store._read_index_for_write()
                 entry = next(
                     (item for item in entries if item["id"] == report_id), None
                 )
@@ -487,6 +490,9 @@ class ReportBuilder:
                 logger.info(f"Report updated: {entry['filename']}")
                 return report_id
 
+            # Read before the HTML is written: an index that cannot be read
+            # raises here (ST-08), and must not leave a file nothing lists.
+            entries = store._read_index_for_write()
             new_id = uuid.uuid4().hex[:6]
             timestamp = now.strftime("%Y%m%d_%H%M%S")
             slug = rendering.slugify(self._title)
@@ -510,7 +516,6 @@ class ReportBuilder:
                 # wrapper, e.g. a bare script) makes the report admin-only.
                 "user_id": store._report_owner.get(),
             }
-            entries = store._read_index()
             entries.append(entry)
             store._write_index(entries)
             store._cleanup_locked()

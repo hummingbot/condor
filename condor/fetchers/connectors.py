@@ -123,7 +123,8 @@ async def fetch_venues(
 ) -> List[Dict]:
     """Venues the trade panel can offer, each with its independent traits.
 
-    Returns ``[{"name", "hummingbot_market_data", "clmm_lp", "credentialed"}, ...]``
+    Returns ``[{"name", "hummingbot_market_data", "clmm_lp", "gecko_candles",
+    "credentialed"}, ...]``
     sorted by name, over the union of three sources: the account's credentialed
     connectors, the candle-capable connectors and the chartable gateway networks.
     The three traits are *independent facts about the venue*, each with exactly one
@@ -204,6 +205,9 @@ async def fetch_venues(
             "name": name,
             "hummingbot_market_data": name in credentialed or name in candle_capable,
             "clmm_lp": name in gateway and network_has_clmm(name),
+            # Where the chart's candles come from, which is not the same
+            # question as whether there is an order book (xrpl has both).
+            "gecko_candles": name in NETWORK_TO_GECKO,
             "credentialed": name in credentialed or name in gateway,
         }
         for name in sorted(credentialed | candle_capable | gateway)

@@ -12,6 +12,7 @@ import {
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
 
+import { ChartState } from "@/components/charts/ChartState";
 import { NoServerCard } from "@/components/NoServerCard";
 import { PositionsTab } from "@/components/portfolio/PositionsTab";
 import { useLpPositions } from "@/hooks/useLpPositions";
@@ -73,16 +74,52 @@ const TIME_PERIODS = ["1D", "1W", "1M"] as const;
 
 // ── Unified Dashboard Strip ──
 
+/**
+ * Whether a tile's query has an answer *for this server*.
+ *
+ * A tile used to read only `data`, so a failed request folded to `0 bots,
+ * +$0.00` — an outage reading as an idle account — and, under
+ * `keepPreviousData`, a server switch showed the previous server's counts
+ * until the new ones landed (FP-10). A tile with no answer reads "—".
+ */
+type TileState = "ok" | "loading" | "error";
+
+function tileState(query: { data: unknown; isError: boolean; isPlaceholderData?: boolean }): TileState {
+  if (query.isPlaceholderData) return query.isError ? "error" : "loading";
+  if (query.data === undefined) return query.isError ? "error" : "loading";
+  // A route that reports an unreachable trading server in band (the bots page
+  // does) resolves with `server_online: false` and empty lists — a failure
+  // that `isError` never sees, and that would read as "0 bots".
+  if (isOffline(query.data)) return "error";
+  return "ok";
+}
+
+/** The in-band "the trading server did not answer" of a 200 response. */
+function isOffline(data: unknown): boolean {
+  return (
+    typeof data === "object" &&
+    data !== null &&
+    (data as { server_online?: unknown }).server_online === false
+  );
+}
+
+/** The details line of a tile that has nothing to report. */
+const tileGap = (state: TileState, what: string) =>
+  state === "error" ? `Could not load ${what}` : `Loading ${what}…`;
+
 function KpiCell({
   label,
   mainValue,
   pnl,
+  pnlTitle,
   details,
   currencySymbol,
 }: {
   label: string;
   mainValue: string | number;
   pnl?: number;
+  /** What the figure beside the headline measures, where "PnL" would mislead. */
+  pnlTitle?: string;
   details: string;
   currencySymbol?: string;
 }) {
@@ -95,6 +132,7 @@ function KpiCell({
         <span className="text-2xl font-bold tabular-nums tracking-tight leading-none whitespace-nowrap">{mainValue}</span>
         {pnl !== undefined && pnl !== null && (
           <span className="inline-flex items-center gap-0.5 text-sm tabular-nums font-semibold whitespace-nowrap"
+            title={pnlTitle}
             style={{ color: pnl >= 0 ? "var(--color-green)" : "var(--color-red)" }}>
             {pnl >= 0 ? <ArrowUpRight className="h-3.5 w-3.5" /> : <ArrowDownRight className="h-3.5 w-3.5" />}
             {formatCurrencyPnl(pnl, currencySymbol || "$")}
@@ -115,9 +153,14 @@ function DashboardStrip({
   controllerCount,
   botPnl,
   botVolume,
+  botConverted,
+  botsState,
   activeExecutorCount,
+  executorsState,
   execStats,
+  execStatsFailed,
   agents,
+  agentsState,
   period,
   onPeriodChange,
   convertFromUsd,
@@ -131,9 +174,17 @@ function DashboardStrip({
   controllerCount: number;
   botPnl: number;
   botVolume: number;
+  /** False when a controller's quote had no rate: the two sums above then hold
+   *  that controller's amounts in its own currency, and the tile says so. */
+  botConverted: boolean;
+  botsState: TileState;
   activeExecutorCount: number;
+  executorsState: TileState;
   execStats: ExecutorPeriodSummary | undefined;
+  /** The period summary errored: say so, rather than "Loading…" for ever. */
+  execStatsFailed: boolean;
   agents: AgentSummary[];
+  agentsState: TileState;
   period: string;
   onPeriodChange: (p: string) => void;
   convertFromUsd: (val: number) => number;
@@ -150,35 +201,47 @@ function DashboardStrip({
           label="Portfolio"
           mainValue={formatCurrency(convertFromUsd(totalUsd), currencySymbol)}
           pnl={portfolioPnl != null ? convertFromUsd(portfolioPnl) : undefined}
+          // A change in *value*, not a PnL: a deposit moves it as much as a trade.
+          pnlTitle={`Change in portfolio value over ${period}, deposits and withdrawals included`}
           details={`${totalTokens} assets · ${connectorCount} connector${connectorCount !== 1 ? "s" : ""}`}
           currencySymbol={currencySymbol}
         />
 
         <KpiCell
           label="Bots"
-          mainValue={botCount}
-          pnl={botPnl}
-          details={`${controllerCount} controller${controllerCount !== 1 ? "s" : ""} · vol ${formatCurrencyVolume(botVolume, currencySymbol)}`}
+          mainValue={botsState === "ok" ? botCount : "—"}
+          pnl={botsState === "ok" ? botPnl : undefined}
+          details={
+            botsState === "ok"
+              ? `${controllerCount} controller${controllerCount !== 1 ? "s" : ""} · vol ${formatCurrencyVolume(botVolume, currencySymbol)}${botConverted ? "" : " ⚠"}`
+              : tileGap(botsState, "bots")
+          }
           currencySymbol={currencySymbol}
         />
 
         <KpiCell
           label="Executors"
-          mainValue={`${activeExecutorCount} active`}
+          mainValue={executorsState === "ok" ? `${activeExecutorCount} active` : "—"}
           pnl={execStats ? convertFromUsd(execStats.pnl) : undefined}
           details={
             execStats
               ? `${execStats.count} in ${period} · vol ${formatCurrencyVolume(convertFromUsd(execStats.volume), currencySymbol)}${execStats.converted ? "" : " ⚠"}`
-              : `Loading ${period}…`
+              : execStatsFailed
+                ? `Could not load ${period}`
+                : `Loading ${period}…`
           }
           currencySymbol={currencySymbol}
         />
 
         <KpiCell
           label="Agents"
-          mainValue={activeAgents.length}
-          pnl={convertFromUsd(agentPnl)}
-          details={`${agents.length} total · ${agentSessions} session${agentSessions !== 1 ? "s" : ""}`}
+          mainValue={agentsState === "ok" ? activeAgents.length : "—"}
+          pnl={agentsState === "ok" ? convertFromUsd(agentPnl) : undefined}
+          details={
+            agentsState === "ok"
+              ? `${agents.length} total · ${agentSessions} session${agentSessions !== 1 ? "s" : ""}`
+              : tileGap(agentsState, "agents")
+          }
           currencySymbol={currencySymbol}
         />
 
@@ -395,7 +458,9 @@ function formatTooltipDate(ts: number, range: string) {
 }
 
 function PortfolioEvolution({ server, range, convertFromUsd, currencySymbol }: { server: string; range: string; convertFromUsd: (val: number) => number; currencySymbol: string }) {
-  const [stacked, setStacked] = useState(false);
+  // What the reader asked for. What is *drawn* stacked is `stacked`, below:
+  // the breakdown is its own request, and until it lands the total is drawn.
+  const [wantStacked, setStacked] = useState(false);
   const [hover, setHover] = useState<{ x: number; point: PortfolioHistoryPoint } | null>(null);
   const queryClient = useQueryClient();
 
@@ -410,19 +475,33 @@ function PortfolioEvolution({ server, range, convertFromUsd, currencySymbol }: {
     });
   }, [server, queryClient]);
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError: historyFailed, refetch } = useQuery({
     queryKey: ["portfolio-history", server, range],
     queryFn: () => api.getPortfolioHistory(server, range),
     enabled: !!server,
     refetchInterval: 60000,
   });
 
-  const { data: breakdownData } = useQuery({
+  const {
+    data: breakdownAnswer,
+    isError: breakdownRejected,
+    refetch: refetchBreakdown,
+  } = useQuery({
     queryKey: ["portfolio-history-breakdown", server, range],
     queryFn: () => api.getPortfolioHistory(server, range, true),
-    enabled: !!server && stacked,
+    enabled: !!server && wantStacked,
     refetchInterval: 60000,
   });
+  // The route reports an unreachable server in band (`server_online: false`
+  // with no points), which resolves the query: a failure `isError` alone
+  // never sees, and which would draw as an account with no history.
+  const isError = historyFailed || isOffline(data);
+  const breakdownFailed = breakdownRejected || isOffline(breakdownAnswer);
+  const breakdownData = isOffline(breakdownAnswer) ? undefined : breakdownAnswer;
+  // Stacked only once there is a breakdown to stack. Before that the stacked
+  // branch had no token series and the line branch was switched off, so the
+  // box was simply blank — while loading, and for good if the request failed.
+  const stacked = wantStacked && !!breakdownData;
 
   const activeData: PortfolioHistoryResponse | undefined = stacked && breakdownData ? breakdownData : data;
   const rawPoints = activeData?.points ?? [];
@@ -556,14 +635,14 @@ function PortfolioEvolution({ server, range, convertFromUsd, currencySymbol }: {
         <div className="flex gap-0.5 rounded border border-[var(--color-border)] p-0.5">
           <button
             onClick={() => setStacked(false)}
-            className={`p-1 rounded transition-colors ${!stacked ? "bg-[var(--color-accent)] text-white" : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"}`}
+            className={`p-1 rounded transition-colors ${!wantStacked ? "bg-[var(--color-accent)] text-white" : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"}`}
             title="Line chart"
           >
             <BarChart3 className="h-3.5 w-3.5" />
           </button>
           <button
             onClick={() => setStacked(true)}
-            className={`p-1 rounded transition-colors ${stacked ? "bg-[var(--color-accent)] text-white" : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"}`}
+            className={`p-1 rounded transition-colors ${wantStacked ? "bg-[var(--color-accent)] text-white" : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"}`}
             title="Stacked area chart"
           >
             <Layers className="h-3.5 w-3.5" />
@@ -575,12 +654,34 @@ function PortfolioEvolution({ server, range, convertFromUsd, currencySymbol }: {
         <div className="flex items-center justify-center h-[250px] text-[var(--color-text-muted)] text-sm">
           Loading...
         </div>
+      ) : isError && points.length === 0 ? (
+        // A failed request is not an account with no history (FP-10).
+        <ChartState
+          kind="error"
+          message="Could not load portfolio history"
+          onRetry={() => void refetch()}
+          height={250}
+        />
       ) : points.length === 0 ? (
         <div className="flex items-center justify-center h-[250px] text-[var(--color-text-muted)] text-sm">
           No history data available
         </div>
       ) : (
         <>
+          {wantStacked && !stacked && (
+            <p data-breakdown-pending className="mb-1 text-[11px] text-[var(--color-text-muted)]">
+              {breakdownFailed ? (
+                <>
+                  Could not load the per-token breakdown — showing the total.{" "}
+                  <button onClick={() => void refetchBreakdown()} className="underline underline-offset-2 hover:no-underline">
+                    Retry
+                  </button>
+                </>
+              ) : (
+                "Loading the per-token breakdown…"
+              )}
+            </p>
+          )}
           <svg
             viewBox={`0 0 ${W} ${H}`}
             width="100%"
@@ -777,13 +878,14 @@ export function Portfolio() {
     return () => clearTimeout(timer);
   }, [server, queryClient]);
 
-  const { data: bots } = useQuery({
+  const botsQuery = useQuery({
     queryKey: ["bots", server],
     queryFn: () => api.getBots(server!),
     enabled: !!server,
     refetchInterval: 30000,
     placeholderData: keepPreviousData,
   });
+  const bots = botsQuery.data;
 
   // Subscribe to the executors WS channel so the KPI strip updates live;
   // the query below shares the canonical unfiltered executors cache key
@@ -795,18 +897,19 @@ export function Portfolio() {
   );
   useCondorWebSocket(executorChannels, server ?? null);
 
-  const { data: allExecutors } = useQuery({
+  const executorsListQuery = useQuery({
     queryKey: executorsQuery(server).queryKey,
     queryFn: () => api.getExecutors(server!),
     enabled: !!server,
     refetchInterval: EXECUTORS_REFETCH_MS,
     placeholderData: keepPreviousData,
   });
+  const allExecutors = executorsListQuery.data;
 
   // Period totals are aggregated server-side over the whole executor history:
   // the cache above is bounded to one poll page, so summing it here reported a
   // fraction of the window on any busy server (CORR-129).
-  const { data: execStats } = useQuery({
+  const { data: execStats, isError: execStatsFailed } = useQuery({
     queryKey: ["executors-summary", server, period],
     queryFn: () => api.getExecutorsSummary(server!, period),
     enabled: !!server,
@@ -816,7 +919,8 @@ export function Portfolio() {
     // old numbers with the new period.
   });
 
-  const { data: agents } = useQuery(agentsQuery());
+  const agentsListQuery = useQuery(agentsQuery());
+  const agents = agentsListQuery.data;
 
   const { data: periodHistory } = useQuery({
     queryKey: ["portfolio-history", server, period],
@@ -928,7 +1032,13 @@ export function Portfolio() {
   const totalUsd = data?.total_usd ?? 0;
   const connectors = data?.connectors ?? [];
 
-  // Compute portfolio PnL from history (follows period selector)
+  // The period's change in value (follows the period selector), measured
+  // between the history's own two ends. NOT the live total minus the first
+  // point (FP-15 tried that): the live total is deduped for unified accounts
+  // (`dedupe_unified_accounts`) and history points are not, so the two are not
+  // the same quantity and a Hyperliquid unified account showed a permanent
+  // false loss. Both ends from one series can lag the headline by a sampling
+  // interval, but they cannot disagree about what is being counted.
   const historyPoints = periodHistory?.points ?? [];
   const portfolioPnl =
     historyPoints.length >= 2
@@ -942,12 +1052,22 @@ export function Portfolio() {
   const activeExecutorCount = executorsList.filter((e) => isExecutorActive(e.status)).length;
 
   // Convert bot PnL and volume per-controller
+  // `convert` hands a value back in quote units when it has no rate (while the
+  // rates load, or for a quote the server has no path for). The sum still
+  // takes it — dropping a controller would be a different wrong number — and
+  // the tile carries the ⚠ the Executors tile already uses (FP-01).
   let botPnl = 0;
   let botVolume = 0;
+  let botConverted = true;
   for (const ctrl of controllers) {
     const quote = ctrl.trading_pair?.split("-")[1] || "USDT";
-    botPnl += convert(ctrl.global_pnl_quote, quote).value;
-    botVolume += convert(ctrl.volume_traded, quote).value;
+    const pnl = convert(ctrl.global_pnl_quote, quote);
+    const volume = convert(ctrl.volume_traded, quote);
+    botPnl += pnl.value;
+    botVolume += volume.value;
+    if ((!pnl.converted && ctrl.global_pnl_quote !== 0) || (!volume.converted && ctrl.volume_traded !== 0)) {
+      botConverted = false;
+    }
   }
 
   // Flatten all tokens for top holdings
@@ -969,9 +1089,14 @@ export function Portfolio() {
         controllerCount={controllerCount}
         botPnl={botPnl}
         botVolume={botVolume}
+        botConverted={botConverted}
+        botsState={tileState(botsQuery)}
         activeExecutorCount={activeExecutorCount}
+        executorsState={tileState(executorsListQuery)}
         execStats={execStats}
+        execStatsFailed={execStatsFailed}
         agents={agents ?? []}
+        agentsState={tileState(agentsListQuery)}
         period={period}
         onPeriodChange={setPeriod}
         convertFromUsd={convertFromUsd}

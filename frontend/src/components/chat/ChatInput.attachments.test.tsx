@@ -43,14 +43,16 @@ function png(name = "shot.png", size = 1024): File {
   return file;
 }
 
-async function render() {
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
+const client = new QueryClient({
+  defaultOptions: { queries: { retry: false } },
+});
+
+/** `draftKey` is the conversation the composer is writing into. */
+async function render(draftKey?: string) {
   await act(async () => {
     root.render(
       <QueryClientProvider client={client}>
-        <ChatInput onSend={onSend} />
+        <ChatInput onSend={onSend} draftKey={draftKey} />
       </QueryClientProvider>,
     );
   });
@@ -237,5 +239,57 @@ describe("attaching an image to a message", () => {
 
     expect(chips()).toHaveLength(4);
     expect(container.textContent).toContain("At most 4 images");
+  });
+});
+
+// The session strip switches conversations under a mounted composer. The text
+// draft already followed its conversation; the pictures stayed in the box, so
+// a screenshot picked for chat A went out with the next message to chat B
+// (FU-15).
+describe("attachments across a session-tab switch", () => {
+  it("do not follow the composer into another conversation", async () => {
+    await render("conv-a");
+    await paste(png("for-a.png"));
+    expect(chips()).toHaveLength(1);
+
+    await render("conv-b");
+
+    expect(chips()).toHaveLength(0);
+    expect(sendButton().disabled).toBe(true);
+    await type("hello b");
+    await act(async () => sendButton().click());
+    expect(onSend).toHaveBeenCalledWith("hello b", undefined);
+  });
+
+  it("are waiting in their own conversation on the way back", async () => {
+    await render("conv-a");
+    await paste(png("for-a.png"));
+    await render("conv-b");
+    await paste(png("for-b.png"));
+
+    await render("conv-a");
+
+    expect(chips().map((c) => c.alt)).toEqual(["for-a.png"]);
+    // Parked, not thrown away: the preview is still the same object URL.
+    expect(revoked).toEqual([]);
+
+    await act(async () => sendButton().click());
+    const [, files] = onSend.mock.calls[0];
+    expect((files as File[]).map((f) => f.name)).toEqual(["for-a.png"]);
+
+    // Sent from A — and B's is still B's.
+    await render("conv-b");
+    expect(chips().map((c) => c.alt)).toEqual(["for-b.png"]);
+  });
+
+  it("releases the parked previews when the composer goes away", async () => {
+    await render("conv-a");
+    await paste(png("for-a.png"));
+    await render("conv-b");
+
+    act(() => root.unmount());
+    root = createRoot(container);
+
+    expect(revoked).toEqual(["blob:local/1"]);
   });
 });

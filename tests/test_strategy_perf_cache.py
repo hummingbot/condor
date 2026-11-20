@@ -82,6 +82,20 @@ def perf_env(tmp_path, monkeypatch):
     return tmp_path, use_client
 
 
+def _let_the_failed_render_expire():
+    """A render that could not be priced is kept for ``_PERF_FAILED_TTL`` only.
+
+    Never the 30s a clean one gets (CORR-666, CORR-709) — just long enough that
+    an outage is not re-walked by every poll (WR-03). Asserts that is all there
+    is in the cache, then lets those seconds pass.
+    """
+    import time
+
+    for expires_at, _value in agents_routes._PERF_CACHE.values():
+        assert expires_at - time.time() <= agents_routes._PERF_FAILED_TTL
+    agents_routes._PERF_CACHE.clear()
+
+
 def _compute(strategy_dir):
     sessions, totals, _unavailable = asyncio.run(
         agents_routes._compute_strategy_performance(RUN_KEY, strategy_dir, None, 1)
@@ -280,11 +294,12 @@ def test_failed_fetch_is_not_cached_in_rollup(perf_env):
     use_client(_FakeClient(api))
 
     _compute(strategy_dir)
-    assert agents_routes._PERF_CACHE == {}
-    # No manual cache clear: the next poll must go back to the backend.
+    _let_the_failed_render_expire()
+    # Nothing longer-lived was kept: the next poll goes back to the backend.
     _compute(strategy_dir)
     assert api.calls[f"{RUN_KEY}_1"] == 2
 
+    _let_the_failed_render_expire()
     api.fail_ids.clear()
     api.rows_by_aid[f"{RUN_KEY}_1"] = [_closed_executor(1.0)]
     _, totals = _compute(strategy_dir)
@@ -406,13 +421,14 @@ def test_failed_bot_snapshot_is_not_cached_in_rollup(perf_env):
     # without the live open book it is not the whole truth.
     assert totals["unrealized_pnl"] == 0.0
     assert totals["open_positions"] == 0
-    assert agents_routes._PERF_CACHE == {}
+    _let_the_failed_render_expire()
 
-    # No manual cache clear: the next poll must go back to the backend.
+    # Nothing longer-lived was kept: the next poll goes back to the backend.
     _compute(strategy_dir)
     assert client.snapshot_calls == 2
 
     # Recovered: the full result, and only now is it worth keeping.
+    _let_the_failed_render_expire()
     client.fail = False
     sessions, totals = _compute(strategy_dir)
     assert client.snapshot_calls == 3
@@ -465,7 +481,7 @@ def test_batch_raise_is_not_cached_in_rollup(perf_env, monkeypatch):
     sessions, totals = _compute(strategy_dir)
     assert sessions == []
     assert totals["total_pnl"] == 0
-    assert agents_routes._PERF_CACHE == {}
+    _let_the_failed_render_expire()
 
     monkeypatch.setattr(performance_module, "fetch_agent_performance_batch", real_batch)
     _, totals = _compute(strategy_dir)
@@ -499,9 +515,9 @@ def test_unreachable_rollup_is_not_cached(perf_env):
     )
     assert unavailable == "unreachable"
     assert totals["total_pnl"] == 0
-    assert agents_routes._PERF_CACHE == {}
+    _let_the_failed_render_expire()
 
-    # Server recovers; no manual cache clear.
+    # Server recovers.
     api = _FakeExecutorsApi({f"{RUN_KEY}_1": [_closed_executor(1.0)]})
     use_client(_FakeClient(api))
     _sessions, totals, unavailable = asyncio.run(
@@ -531,10 +547,12 @@ def test_priced_is_bound_once_as_the_access_predicate():
     """READ-696: ``priced`` names only the SEC-334 access bool that picks the
     cache bucket; the experiment de-dup set has its own name, so a later
     ``if priced:`` can never silently test set emptiness."""
-    src = textwrap.dedent(
-        inspect.getsource(agents_routes._compute_strategy_performance)
+    # The cache/single-flight front and the walk behind it, read as one body.
+    tree = ast.parse(
+        textwrap.dedent(inspect.getsource(agents_routes._compute_strategy_performance))
+        + "\n"
+        + textwrap.dedent(inspect.getsource(agents_routes._render_strategy_performance))
     )
-    tree = ast.parse(src)
     bindings = [
         node.value
         for node in ast.walk(tree)
@@ -573,6 +591,7 @@ def test_a_held_client_to_a_downed_backend_reads_unreachable(perf_env):
 
     assert _unavailable(strategy_dir) == "unreachable"
 
+    _let_the_failed_render_expire()
     api.fail_ids.clear()
     assert _unavailable(strategy_dir) == ""
 
@@ -609,3 +628,90 @@ def test_the_single_session_fetch_reports_a_failed_bot_snapshot():
         fetch_agent_performance(client, aid, bot_names=["ns-bot"], failed_ids=failed)
     )
     assert failed == set()
+
+
+# ── WR-03: one walk per expiry, however many polls miss together ──
+
+
+class _GatedExecutorsApi(_FakeExecutorsApi):
+    """Holds every ``search_executors`` until the test opens the gate."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.gate = None
+
+    async def search_executors(self, *args, **kwargs):
+        await self.gate.wait()
+        return await super().search_executors(*args, **kwargs)
+
+
+def test_concurrent_cold_callers_share_one_walk(perf_env):
+    strategy_dir, use_client = perf_env
+    _make_sessions(strategy_dir, [1])
+    api = _GatedExecutorsApi({f"{RUN_KEY}_1": [_closed_executor(1.0)]})
+    use_client(_FakeClient(api))
+
+    async def scenario():
+        api.gate = asyncio.Event()
+        callers = [
+            asyncio.ensure_future(
+                agents_routes._compute_strategy_performance(
+                    RUN_KEY, strategy_dir, None, 1
+                )
+            )
+            for _ in range(5)
+        ]
+        await asyncio.sleep(0.05)  # all five are past the cache check
+        api.gate.set()
+        return await asyncio.gather(*callers)
+
+    results = asyncio.run(scenario())
+
+    assert api.calls == {f"{RUN_KEY}_1": 1}
+    assert all(r[1]["total_pnl"] == pytest.approx(1.0) for r in results)
+
+
+def test_a_cancelled_caller_does_not_abandon_the_walk(perf_env):
+    """Navigating away used to cancel the fetch and leave nothing cached."""
+    strategy_dir, use_client = perf_env
+    _make_sessions(strategy_dir, [1])
+    api = _GatedExecutorsApi({f"{RUN_KEY}_1": [_closed_executor(1.0)]})
+    use_client(_FakeClient(api))
+
+    async def scenario():
+        api.gate = asyncio.Event()
+        first = asyncio.ensure_future(
+            agents_routes._compute_strategy_performance(RUN_KEY, strategy_dir, None, 1)
+        )
+        await asyncio.sleep(0.05)
+        first.cancel()
+        api.gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        for _ in range(50):
+            if agents_routes._PERF_CACHE:
+                break
+            await asyncio.sleep(0.01)
+
+    asyncio.run(scenario())
+
+    assert len(agents_routes._PERF_CACHE) == 1
+    _, totals = _compute(strategy_dir)
+    assert totals["total_pnl"] == pytest.approx(1.0)
+    assert api.calls == {f"{RUN_KEY}_1": 1}
+
+
+def test_an_outage_is_not_rewalked_by_every_poll(perf_env):
+    """The short negative entry: polls inside it share the failed render."""
+    strategy_dir, use_client = perf_env
+    _make_sessions(strategy_dir, [1])
+    api = _FakeExecutorsApi({}, fail_ids={f"{RUN_KEY}_1"})
+    use_client(_FakeClient(api))
+
+    assert _unavailable(strategy_dir) == "unreachable"
+    assert _unavailable(strategy_dir) == "unreachable"
+    assert api.calls[f"{RUN_KEY}_1"] == 1
+
+    _let_the_failed_render_expire()
+    assert _unavailable(strategy_dir) == "unreachable"
+    assert api.calls[f"{RUN_KEY}_1"] == 2

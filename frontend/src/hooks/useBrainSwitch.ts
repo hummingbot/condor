@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 
 import type { BrainSelection } from "@/components/chat/BrainPicker";
 import { useChat } from "@/hooks/useChat";
@@ -20,32 +20,42 @@ import { useChat } from "@/hooks/useChat";
  * chrome saying the same thing.
  */
 export function useBrainSwitch() {
-  const chat = useChat();
+  // Read field by field: the `chat` object is a new one on every stream flush,
+  // and the two callbacks below are handed to memoised children (FU-04).
+  const {
+    activeSlotId,
+    switchBrain: chatSwitchBrain,
+    switchServer: chatSwitchServer,
+  } = useChat();
   const [switchError, setSwitchError] = useState<string | null>(null);
 
-  const switchBrain = (selection: BrainSelection, startErrorMessageId?: string) => {
-    if (!chat.activeSlotId) return;
-    setSwitchError(null);
-    chat
-      .switchBrain(chat.activeSlotId, selection, startErrorMessageId)
-      .catch((e: Error) => {
-        // A retry named by `startErrorMessageId` already reports its own
-        // failure inline, on the note it came from — the dismissible banner
-        // below is for every other picker, which has no note of its own to
-        // report into, and would otherwise just repeat the same words twice.
-        if (startErrorMessageId) return;
-        setSwitchError(e.message || "Could not switch");
-      });
-  };
+  const switchBrain = useCallback(
+    (selection: BrainSelection, startErrorMessageId?: string) => {
+      if (!activeSlotId) return;
+      setSwitchError(null);
+      chatSwitchBrain(activeSlotId, selection, startErrorMessageId).catch(
+        (e: Error) => {
+          // A retry named by `startErrorMessageId` already reports its own
+          // failure inline, on the note it came from — the dismissible banner
+          // below is for every other picker, which has no note of its own to
+          // report into, and would otherwise just repeat the same words twice.
+          if (startErrorMessageId) return;
+          setSwitchError(e.message || "Could not switch");
+        },
+      );
+    },
+    [activeSlotId, chatSwitchBrain],
+  );
 
-  const switchServer = (slotId: string, serverName: string) => {
-    setSwitchError(null);
-    chat
-      .switchServer(slotId, serverName)
-      .catch((e: Error) =>
+  const switchServer = useCallback(
+    (slotId: string, serverName: string) => {
+      setSwitchError(null);
+      chatSwitchServer(slotId, serverName).catch((e: Error) =>
         setSwitchError(e.message || `Could not switch to server ${serverName}`),
       );
-  };
+    },
+    [chatSwitchServer],
+  );
 
   return {
     switchBrain,

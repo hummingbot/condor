@@ -197,7 +197,7 @@ def test_history_is_newest_first_and_honors_limit(store, seat):
     assert [r["label"] for r in out["runs"]] == ["newer"]
 
 
-def test_get_returns_the_full_record_unclipped(store, seat):
+def test_get_returns_the_record_past_the_run_clip(store, seat):
     _save(
         store,
         "code_1_a",
@@ -212,6 +212,39 @@ def test_get_returns_the_full_record_unclipped(store, seat):
     assert out["code"] == "print('x')"
     assert len(out["stdout"]) == 9000, "get is how a failed snippet is read back"
     assert out["traceback"] == 'File "<code_run>", line 1'
+
+
+def test_get_pages_a_long_run_instead_of_returning_it_whole(store, seat):
+    """One result must fit a context; the rest is an ``offset`` away (RT-08)."""
+    body = "".join(f"{i:07d}\n" for i in range(8000))  # 64,000 chars
+    _save(store, "code_2_a", code="print('x')", stdout=body, result="r" * 30)
+
+    pages = []
+    offset = 0
+    while True:
+        out = asyncio.run(
+            code_tool.run_code(action="get", run_id="code_2_a", offset=offset)
+        )
+        assert len(out["stdout"]) <= code_tool._GET_CLIP
+        pages.append(out["stdout"])
+        if not out.get("truncated"):
+            break
+        assert f"offset={out['next_offset']}" in out["note"]
+        offset = out["next_offset"]
+
+    assert len(pages) == 4
+    assert "".join(pages) == body
+    # The code is never windowed: it is what gets corrected and re-run.
+    assert out["code"] == "print('x')"
+
+
+def test_a_short_run_is_not_marked_truncated(store, seat):
+    _save(store, "code_3_a", stdout="hi\n")
+
+    out = asyncio.run(code_tool.run_code(action="get", run_id="code_3_a"))
+
+    assert out["stdout"] == "hi\n"
+    assert "truncated" not in out and "next_offset" not in out
 
 
 def test_get_without_an_id_or_for_an_unknown_run_is_an_error(store, seat):

@@ -89,6 +89,12 @@ class PortfolioHistoryResponse(BaseModel):
     points: list[PortfolioHistoryPoint]
     interval: str
     top_tokens: list[str] = []
+    #: False when the history could not be read at all — the server did not
+    #: answer and there is no earlier answer to serve. Without it a failed read
+    #: was an empty ``points``, which the dashboard draws as an account with no
+    #: history.
+    server_online: bool = True
+    error_hint: Optional[str] = None
 
 
 # ── Bots ──
@@ -181,7 +187,11 @@ class BotsPageResponse(BaseModel):
 
 class BotRunsResponse(BaseModel):
     runs: list[BotRunInfo] = []
+    #: The number of runs on *this page* — upstream reports no overall total.
     total: int = 0
+    #: Whether older runs exist past this page (``offset + total``). Without it
+    #: a full page is indistinguishable from the whole history (WR-05).
+    has_more: bool = False
 
 
 class TerminatedControllersResponse(BaseModel):

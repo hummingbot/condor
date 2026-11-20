@@ -13,11 +13,13 @@ Key components:
 # Base utilities (commonly used across formatters)
 from .base import (
     format_currency,
+    format_exact,
     format_number,
     format_percentage,
     format_table_separator,
     format_time_only,
     format_timestamp,
+    format_usd,
     get_field,
     get_timestamp_field,
     truncate_address,
@@ -59,7 +61,7 @@ from .market_data import (
 from .portfolio import format_lp_positions_table, format_portfolio_as_table
 
 # Table builder for creating consistent tables
-from .table_builder import ColumnDef, TableBuilder
+from .table_builder import ColumnDef, TableBuilder, render_table
 
 # Trading formatters
 from .trading import format_orders_as_table, format_positions_as_table
@@ -73,6 +75,8 @@ __all__ = [
     "format_clmm_result",
     # Base utilities
     "format_currency",
+    "format_exact",
+    "format_usd",
     "format_number",
     "format_percentage",
     "format_table_separator",
@@ -85,6 +89,7 @@ __all__ = [
     # Table builder
     "ColumnDef",
     "TableBuilder",
+    "render_table",
     # Trading formatters
     "format_orders_as_table",
     "format_positions_as_table",

@@ -272,3 +272,111 @@ class TestRoutineStoreResolve:
 
         assert _exec_count(s1) == 1
         assert _exec_count(s2) == 1
+
+
+# ── ST-11: the static (never-imported) listing is cached per file too ──
+
+
+class TestStaticListingCache:
+    """``agent_routine_overview`` / ``pending_routines`` re-read, re-hashed and
+    ``ast.parse``d every agent routine file on every call — the import path had
+    an mtime cache, the static one added for the consent gate had none."""
+
+    SLUG = "st11agent"
+
+    def _agent(self, tmp_path, monkeypatch, names=("alpha", "beta")):
+        from routines.base import assistant_routines_dir
+
+        monkeypatch.setattr(base, "_PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(base, "_path_caches", {})
+        monkeypatch.setattr(base, "_static_reads", {})
+        routines_dir = assistant_routines_dir(self.SLUG)
+        for name in names:
+            _write_routine(routines_dir, name, tmp_path / "execs.txt")
+        return routines_dir
+
+    def _count_reads(self, monkeypatch):
+        reads = []
+        real = base._read_text
+
+        def counting(file_path):
+            reads.append(Path(file_path).name)
+            return real(file_path)
+
+        monkeypatch.setattr(base, "_read_text", counting)
+        return reads
+
+    def test_a_second_listing_reads_no_file(self, tmp_path, monkeypatch):
+        self._agent(tmp_path, monkeypatch)
+        reads = self._count_reads(monkeypatch)
+
+        first = base.agent_routine_overview(self.SLUG)
+        assert sorted(reads) == ["alpha.py", "beta.py"]
+        reads.clear()
+
+        second = base.agent_routine_overview(self.SLUG)
+        catalog = base.catalog_agent_routines(self.SLUG)
+
+        assert reads == []
+        assert second == first
+        assert set(catalog) == {"alpha", "beta"}
+        # And nothing was imported to produce any of it.
+        assert _exec_count(tmp_path / "execs.txt") == 0
+
+    def test_the_store_listing_reads_nothing_the_second_time(
+        self, tmp_path, monkeypatch
+    ):
+        from condor.routine_store import RoutineStore
+
+        self._agent(tmp_path, monkeypatch)
+        monkeypatch.setenv("CONDOR_REPORTS_DIR", str(tmp_path / "reports"))
+        store = RoutineStore()
+        store.list_routines()
+        reads = self._count_reads(monkeypatch)
+
+        rows = store.list_routines()
+
+        assert reads == []
+        assert f"{self.SLUG}/alpha" in {row["name"] for row in rows}
+
+    def test_an_edited_file_is_read_again(self, tmp_path, monkeypatch):
+        routines_dir = self._agent(tmp_path, monkeypatch)
+        base.agent_routine_overview(self.SLUG)
+        reads = self._count_reads(monkeypatch)
+
+        target = routines_dir / "alpha.py"
+        target.write_text(
+            target.read_text().replace("Test routine alpha", "Edited description")
+        )
+        _bump_mtime(target)
+        rows = {row.name: row for row in base.agent_routine_overview(self.SLUG)}
+
+        assert reads == ["alpha.py"]
+        assert rows["alpha"].description == "Edited description"
+
+    def test_a_consent_change_invalidates_without_touching_the_file(
+        self, tmp_path, monkeypatch
+    ):
+        from condor.agents import code_trust
+
+        routines_dir = self._agent(tmp_path, monkeypatch)
+        code_trust.arm(self.SLUG)
+        assert [r.name for r in base.pending_routines(self.SLUG)] == ["alpha", "beta"]
+        assert base.catalog_agent_routines(self.SLUG) == {}
+
+        # Allowing leaves the file's mtime and size exactly as they were.
+        code_trust.allow(self.SLUG, "alpha", (routines_dir / "alpha.py").read_text())
+
+        assert [r.name for r in base.pending_routines(self.SLUG)] == ["beta"]
+        assert set(base.catalog_agent_routines(self.SLUG)) == {"alpha"}
+        rows = {row.name: row for row in base.agent_routine_overview(self.SLUG)}
+        assert rows["alpha"].allowed is True
+        assert rows["beta"].allowed is False
+
+    def test_a_deleted_file_drops_out(self, tmp_path, monkeypatch):
+        routines_dir = self._agent(tmp_path, monkeypatch)
+        base.agent_routine_overview(self.SLUG)
+
+        (routines_dir / "beta.py").unlink()
+
+        assert [r.name for r in base.agent_routine_overview(self.SLUG)] == ["alpha"]

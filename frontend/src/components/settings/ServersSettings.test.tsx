@@ -30,6 +30,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { ServerContext } from "@/hooks/useServer";
 import type { ServerInfo } from "@/lib/api";
 import { ServersSettings } from "./ServersSettings";
 
@@ -59,10 +60,17 @@ const SERVERS: ServerInfo[] = [
   },
 ];
 
+/** What the list endpoint answers with; a test may swap it before rendering. */
+let listed: ServerInfo[] = SERVERS;
+/** Every selection the component makes through the server context. */
+let selections: (string | null)[] = [];
+
 beforeEach(() => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   localStorage.clear();
   sent = [];
+  listed = SERVERS;
+  selections = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (path: string, init?: RequestInit) => {
@@ -73,11 +81,11 @@ beforeEach(() => {
           method,
           body: JSON.parse((init?.body as string) ?? "{}"),
         });
-        return new Response(JSON.stringify({ updated: true, added: true }), {
+        return new Response(JSON.stringify({ updated: true, added: true, deleted: true }), {
           headers: { "Content-Type": "application/json" },
         });
       }
-      return new Response(JSON.stringify(SERVERS), {
+      return new Response(JSON.stringify(listed), {
         headers: { "Content-Type": "application/json" },
       });
     }),
@@ -93,7 +101,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function render() {
+async function render(activeServer: string | null = null) {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
@@ -103,7 +111,11 @@ async function render() {
       // (FEAT-088), so the component reads the router's search params.
       <QueryClientProvider client={qc}>
         <MemoryRouter>
-          <ServersSettings />
+          <ServerContext.Provider
+            value={{ server: activeServer, setServer: (s) => selections.push(s) }}
+          >
+            <ServersSettings />
+          </ServerContext.Provider>
         </MemoryRouter>
       </QueryClientProvider>,
     );
@@ -224,5 +236,45 @@ describe("adding a server", () => {
       "port",
       "username",
     ]);
+  });
+});
+
+describe("deleting a server (FU-09)", () => {
+  const TWO: ServerInfo[] = [
+    ...SERVERS,
+    { name: "backup", host: "10.0.0.9", port: 8000, online: true, permission: "owner", is_default: false },
+  ];
+
+  async function deleteServer(name: string) {
+    const row = [...container.querySelectorAll("button[title=Delete]")][
+      listed.findIndex((s) => s.name === name)
+    ] as HTMLButtonElement;
+    await act(async () => row.click());
+    await act(async () =>
+      (container.querySelector('button[title="Confirm delete"]') as HTMLButtonElement).click(),
+    );
+    await waitFor(() => sent.length > 0);
+  }
+
+  it("moves the selection off the server that was just deleted", async () => {
+    listed = TWO;
+    await render("prod");
+    await deleteServer("prod");
+
+    expect(sent[0]).toMatchObject({ method: "DELETE", url: "/api/v1/settings/servers/prod" });
+    expect(selections).toEqual(["backup"]);
+  });
+
+  it("clears the selection when the deleted server was the only one", async () => {
+    await render("prod");
+    await deleteServer("prod");
+    expect(selections).toEqual([null]);
+  });
+
+  it("leaves the selection alone when another server is deleted", async () => {
+    listed = TWO;
+    await render("prod");
+    await deleteServer("backup");
+    expect(selections).toEqual([]);
   });
 });

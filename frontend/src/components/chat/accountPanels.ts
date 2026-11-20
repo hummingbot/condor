@@ -24,7 +24,7 @@
  * hook owns one fact — *which sections* the reader wants — and the pane owns
  * the other: whether the desk is the thing on screen.
  */
-import { Cpu, Repeat, Wallet } from "lucide-react";
+import { Bot, Repeat, Wallet } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import type { RailItem } from "@/components/chat/WorkspaceRail";
@@ -53,8 +53,8 @@ export const PANELS: {
   },
   {
     id: "execution",
-    label: "Activity",
-    Icon: Cpu,
+    label: "Bots",
+    Icon: Bot,
     hint: "Every controller deployed — what it has done, and pause or start it",
     disabledHint: "Select a server to see what is deployed",
   },

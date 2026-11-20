@@ -8,6 +8,7 @@ from dictionaries with fallback support.
 """
 
 from datetime import datetime, timezone
+from decimal import ROUND_DOWN, Context, Decimal, InvalidOperation
 from typing import Any
 
 
@@ -50,6 +51,94 @@ def format_number(num: Any, decimals: int = 2, compact: bool = True) -> str:
         return f"{num_float:.{decimals}f}"
     except (ValueError, TypeError):
         return str(num)
+
+
+#: Significant digits :func:`format_exact` keeps of a fraction. Twelve is past
+#: any tick size or lot step a venue quotes, and short of the float noise a
+#: doubled value carries (0.1 + 0.2 renders as 0.3, not 0.30000000000000004).
+EXACT_SIGNIFICANT_DIGITS = 12
+
+#: How far the twelve-digit rounding may move a value *up* and still be taken
+#: for float noise rather than for digits the value really has. A double is
+#: good to about 1.1e-16 relative; 1e-15 is a few steps of that.
+_FLOAT_NOISE = Decimal("1e-15")
+
+
+def format_exact(num: Any) -> str:
+    """Render an amount or a price as the number it is — for a table a model trades on.
+
+    No fixed decimal count and no K/M compaction: ``0.015`` stays ``0.015`` (two
+    decimals made it ``0.01``, a third less), ``0.00002345`` stays ``0.00002345``
+    (it rendered as ``0.0000``) and ``12345678.9`` stays ``12345678.9`` (it
+    rendered as ``12.3457M``). Plain positional notation, never an exponent, so
+    the cell can be copied into the next call as-is.
+
+    Never more than the value: a fraction is kept to twelve significant digits,
+    and where that cut would round *up* it truncates instead, so an amount
+    passed back from the table is one the account can cover. A whole number is
+    rendered in full.
+
+    Examples:
+        >>> format_exact(0.015)
+        '0.015'
+        >>> format_exact("0.00002345")
+        '0.00002345'
+        >>> format_exact(1234.5)
+        '1234.5'
+        >>> format_exact("12345678.123456789")
+        '12345678.1234'
+        >>> format_exact(None)
+        'N/A'
+    """
+    if num is None or num == "N/A" or isinstance(num, bool):
+        return "N/A"
+    try:
+        value = Decimal(str(num))
+    except (InvalidOperation, ValueError, TypeError):
+        return str(num)
+    if not value.is_finite():
+        return str(num)
+    if value == 0:
+        return "0"
+    if value == value.to_integral_value():
+        # A whole number has no noise to trim, and trimming it is just wrong:
+        # 123456789012345 units is not 123456789012000.
+        rounded = value
+    else:
+        rounded = Context(prec=EXACT_SIGNIFICANT_DIGITS).create_decimal(value)
+        if abs(rounded) > abs(value) and abs(rounded - value) > abs(value) * (
+            _FLOAT_NOISE
+        ):
+            # Rounding to nearest went *up* by more than noise, so the cell
+            # would name more than there is -- and a balance read back from it
+            # ("sell all available") is an order the venue rejects. Truncate
+            # instead: the cell may fall short of the value, never exceed it.
+            rounded = Context(
+                prec=EXACT_SIGNIFICANT_DIGITS, rounding=ROUND_DOWN
+            ).create_decimal(value)
+    text = format(rounded, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
+
+
+def format_usd(num: Any) -> str:
+    """A USD (or quote) value for a table cell: cents, no K/M, no thousands comma.
+
+    Below one unit the cents would round a small PnL or fee to nothing, so the
+    value falls back to :func:`format_exact`.
+    """
+    if num is None or num == "N/A" or isinstance(num, bool):
+        return "N/A"
+    try:
+        value = float(num)
+    except (ValueError, TypeError):
+        return str(num)
+    if value != value or value in (float("inf"), float("-inf")):
+        return str(num)
+    if value != 0 and abs(value) < 1:
+        return format_exact(num)
+    return f"{value:.2f}"
 
 
 def format_timestamp(ts: Any, format_str: str = "%m/%d %H:%M") -> str:

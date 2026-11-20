@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 
-import { api } from "@/lib/api";
+import { priceQuery } from "@/lib/queryClient";
 import { candleChannelKey, candleStore } from "@/lib/candle-store";
 import { formatCompactVolume } from "@/lib/formatters";
 import { changeColumnLabel, changeWindowTitle, formatChange } from "@/lib/marketChange";
@@ -96,12 +96,9 @@ export function PriceTicker({
   }, [server, connector, pair, interval]);
 
   // REST fallback for bid/ask/spread (less frequent)
-  const { data: price } = useQuery({
-    queryKey: ["price", server, connector, pair],
-    queryFn: () => api.getPrice(server, connector, pair),
-    enabled: !!server && !!connector && !!pair && hasRestPrice,
-    refetchInterval: 15_000,
-  });
+  const { data: price } = useQuery(
+    priceQuery(server, connector, pair, { enabled: hasRestPrice }),
+  );
 
   // 24h stats for this pair, off the connector-wide ticker snapshot the market
   // browser already caches — same query key, so opening the browser costs

@@ -1,7 +1,21 @@
 import { type Query, QueryClient } from "@tanstack/react-query";
 
 import { venuesQueryKey } from "@/components/market/useVenues";
-import { api, type AgentDetail } from "@/lib/api";
+import { api, errorStatus, type AgentDetail } from "@/lib/api";
+
+/**
+ * Default retry rule: one retry, and only for a failure that can change on a
+ * second attempt — no status at all (network), a 5xx, or 408/429. A 401, 403,
+ * 404 or 422 is the server's answer; repeating the request only delays the
+ * error and doubles the traffic (FD-06).
+ */
+export function shouldRetryQuery(failureCount: number, error: unknown): boolean {
+  const status = errorStatus(error);
+  return (
+    failureCount < 1 &&
+    (status === undefined || status >= 500 || status === 408 || status === 429)
+  );
+}
 
 /**
  * App-wide TanStack Query cache.
@@ -13,7 +27,7 @@ import { api, type AgentDetail } from "@/lib/api";
 export const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      retry: 1,
+      retry: shouldRetryQuery,
       staleTime: 5000,
     },
   },
@@ -245,6 +259,37 @@ export function agentsQuery(opts: { enabled?: boolean } = {}) {
     queryFn: () => api.getAgents(),
     enabled: opts.enabled ?? true,
     refetchInterval: AGENTS_REFETCH_MS,
+  };
+}
+
+/**
+ * Poll cadence for a market's REST price.
+ *
+ * One constant for the reason `AGENTS_REFETCH_MS` spells out. `/trade` mounts
+ * two observers of this key — the page, whose order forms price off it, and
+ * the ticker strip, which reads bid/ask — and they used to declare 5 s and
+ * 15 s by hand; react-query ran the shared key at 5 s, so the 15 s was a
+ * number that described nothing (FD-11). 5 s is what the forms need and what
+ * the page was already paying.
+ */
+export const PRICE_REFETCH_MS = 5_000;
+
+/**
+ * The one declaration of `GET /market/prices` for a market: key, fetch and
+ * cadence. `enabled` carries the caller's own condition — a venue without a
+ * REST price never asks.
+ */
+export function priceQuery(
+  server: string | null,
+  connector: string,
+  pair: string,
+  opts: { enabled?: boolean } = {},
+) {
+  return {
+    queryKey: ["price", server, connector, pair] as const,
+    queryFn: () => api.getPrice(server!, connector, pair),
+    enabled: !!server && !!connector && !!pair && (opts.enabled ?? true),
+    refetchInterval: PRICE_REFETCH_MS,
   };
 }
 

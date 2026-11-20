@@ -389,6 +389,13 @@ export function aggregatePnlSeries(
   enabledIds: Set<string>,
   controllers: ControllerInfo[],
   convertFn?: ConvertFn,
+  /**
+   * Filled with every quote currency a non-zero value was folded in **without
+   * a rate** — still in quote units, added to the series at face value. The
+   * caller owns saying so: a line that mixes unconverted BRL into dollars is
+   * off by the whole FX rate and looks exactly like one that is not.
+   */
+  unconverted?: Set<string>,
 ): PnlChartPoint[] {
   if (!snapshots || snapshots.length === 0) return [];
 
@@ -402,7 +409,9 @@ export function aggregatePnlSeries(
   const cv = (val: number, pair: string) => {
     if (!convertFn) return val;
     const quote = pair?.split("-")[1] || "USDT";
-    return convertFn(val, quote).value;
+    const result = convertFn(val, quote);
+    if (!result.converted && val !== 0) unconverted?.add(quote.toUpperCase());
+    return result.value;
   };
 
   // Each row carries the epoch-ms of its own timestamp, parsed here and only

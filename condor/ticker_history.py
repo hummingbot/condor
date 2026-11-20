@@ -25,6 +25,7 @@ Only prices are stored. Volumes are already 24h rolling and need no reference.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -115,11 +116,20 @@ def _prices(pool: dict[str, Any]) -> dict[str, dict[str, float]]:
     return out
 
 
-def record(server: str, pool: dict[str, Any], now: float | None = None) -> bool:
+def record(
+    server: str,
+    pool: dict[str, Any],
+    now: float | None = None,
+    *,
+    persist: bool = True,
+) -> bool:
     """Snapshot ``pool``'s prices if the newest entry is an hour old.
 
     Reads nothing but the dict it is handed — the pool has already been fetched
     by the SDS, so recording history costs zero upstream requests.
+
+    ``persist=False`` updates the in-memory ring only and leaves the file to
+    the caller (:func:`_on_cache_write` writes it off the event loop).
 
     Returns True when a snapshot was written.
     """
@@ -127,25 +137,34 @@ def record(server: str, pool: dict[str, Any], now: float | None = None) -> bool:
         return False
     now = time.time() if now is None else now
 
+    # Due-ness first: this runs on every 60s pool write and is due once an
+    # hour, so walking every ticker of every connector before asking would be
+    # fifty-nine wasted walks out of sixty.
+    ring = _ring(server)
+    if ring and now - ring[-1]["t"] < SNAPSHOT_INTERVAL_S:
+        return False
+
     prices = _prices(pool)
     if not prices:
         # An empty pool is a blip, not a market where everything is worth zero.
         return False
 
-    ring = _ring(server)
-    if ring and now - ring[-1]["t"] < SNAPSHOT_INTERVAL_S:
-        return False
-
     ring.append({"t": now, "connectors": prices})
     del ring[:-RING_SIZE]
 
+    if persist:
+        _persist(server, ring)
+    return True
+
+
+def _persist(server: str, ring: list[dict[str, Any]]) -> None:
+    """Write ``ring`` to this server's file. Never raises."""
     try:
         atomic_write_json(_path(server), ring)
     except (OSError, paths.UnsafeIdError) as exc:
         # The ring stays in memory and is useful for as long as the process
         # lives; only its restart cushion is lost.
         logger.warning("Could not persist ticker history for '%s': %s", server, exc)
-    return True
 
 
 def reference(
@@ -173,8 +192,19 @@ def _on_cache_write(key: Any, value: Any) -> None:
     """SDS listener: record every ticker-pool write, ignore everything else."""
     from condor.server_data_service import ServerDataType
 
-    if key.data_type is ServerDataType.TICKER_POOL and isinstance(value, dict):
+    if key.data_type is not ServerDataType.TICKER_POOL or not isinstance(value, dict):
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
         record(key.server, value)
+        return
+    if record(key.server, value, persist=False):
+        # This hook runs inline on the event loop's cache write. Serializing
+        # 25 whole-venue snapshots and fsyncing them does not belong there, so
+        # the write goes to a worker thread with a copy of the ring — entries
+        # are never mutated once appended, only the list itself is.
+        loop.run_in_executor(None, _persist, key.server, list(_ring(key.server)))
 
 
 def install_listener() -> None:

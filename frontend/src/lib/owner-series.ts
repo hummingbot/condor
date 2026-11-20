@@ -60,6 +60,8 @@ export function ownerSeries(
   owners: readonly SeriesOwner[],
   controllers: ControllerInfo[],
   convert?: ConvertFn,
+  /** Filled with the quotes folded in without a rate (see `aggregatePnlSeries`). */
+  unconverted?: Set<string>,
 ): { total: PnlChartPoint[]; owners: OwnerSeries[] } {
   // `aggregatePnlSeries` stamps its live point with `Date.now()` at call time,
   // so N+1 calls can land on N+1 consecutive milliseconds. Snapped to one
@@ -72,7 +74,9 @@ export function ownerSeries(
   const all = new Set<string>();
   for (const owner of owners) for (const key of owner.keys) all.add(key);
 
-  const total = aggregatePnlSeries(snapshots, all, controllers, convert);
+  // The Total is the union of the owners' keys, so what it could not convert
+  // is everything any owner line could not.
+  const total = aggregatePnlSeries(snapshots, all, controllers, convert, unconverted);
   const lines = owners.map((owner) => ({
     key: owner.key,
     label: owner.label,

@@ -173,7 +173,7 @@ async function render(
       <QueryClientProvider client={qc}>
         <MemoryRouter initialEntries={[`/agents/brigado?view=fleet${search}`]}>
           <ServerContext.Provider
-            value={{ server: ambient, setServer: (s) => switched.push(s) }}
+            value={{ server: ambient, setServer: (s) => s && switched.push(s) }}
           >
             <AgentFleet
               slug="brigado"

@@ -1,5 +1,5 @@
 import {
-  Activity,
+  Bot,
   Brain,
   Droplets,
   Settings,
@@ -47,7 +47,7 @@ export const NAV_ITEMS = [
   { to: "/portfolio", icon: Wallet, label: "Portfolio" },
   { to: "/trade", icon: Swords, label: "Trade" },
   { to: "/dex", icon: Droplets, label: "DEX" },
-  { to: "/bots", icon: Activity, label: "Activity" },
+  { to: "/bots", icon: Bot, label: "Bots" },
   { to: "/routines", icon: Zap, label: "Routines" },
   { to: "/settings", icon: Settings, label: "Settings" },
 ] as const;

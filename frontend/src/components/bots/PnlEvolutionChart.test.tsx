@@ -511,10 +511,14 @@ describe("PnlEvolutionChart legend toggles (FEAT-085)", () => {
    * click as readily as the ones after it. Clearing and re-rendering is also
    * how a locked entry is checked: a click that legitimately does nothing
    * produces no render of its own to read.
+   *
+   * The series is handed over as a fresh array each time: the chart is
+   * memoised on its props (FP-12), so the same array would be no render at
+   * all and there would be nothing to read back.
    */
   function draw(): Recorded[][] {
     recorded.length = 0;
-    render(<PnlEvolutionChart data={data} title="PnL" pnlHeight={220} volumeHeight={120} />);
+    render(<PnlEvolutionChart data={[...data]} title="PnL" pnlHeight={220} volumeHeight={120} />);
     return panes();
   }
 
@@ -1159,5 +1163,34 @@ describe("PnlEvolutionChart range zoom (READ-249)", () => {
   it("offers no strip at all when there is nothing to zoom", () => {
     render(chart(flat)); // two points
     expect(container.querySelector("[data-range-track]")).toBeNull();
+  });
+});
+
+describe("PnlEvolutionChart render cost (FP-12)", () => {
+  const t0 = new Date(2026, 2, 14, 8, 30).getTime();
+  const series: PnlChartPoint[] = [
+    { time: t0, realized: 10, unrealized: 2, total: 12, volume: 5_000, volumeDelta: 0, position: 800 },
+    { time: t0 + 900_000, realized: 20, unrealized: -3, total: 17, volume: 5_400, volumeDelta: 400, position: -600 },
+  ];
+
+  it("animates none of its series: a refresh every few seconds would never stop tweening", () => {
+    recorded.length = 0;
+    render(<PnlEvolutionChart data={series} title="PnL" pnlHeight={220} volumeHeight={120} />);
+
+    const drawn = recorded.filter((r) => r.type === "Line" || r.type === "Area" || r.type === "Bar");
+    expect(drawn.length).toBeGreaterThanOrEqual(5);
+    for (const mark of drawn) expect(mark.props.isAnimationActive).toBe(false);
+  });
+
+  it("does not render again for a parent re-render that changes nothing it draws", () => {
+    render(<PnlEvolutionChart data={series} title="PnL" pnlHeight={220} volumeHeight={120} notice={{ label: "partial" }} />);
+    recorded.length = 0;
+
+    // The same series, and a notice rebuilt inline that says the same thing.
+    render(<PnlEvolutionChart data={series} title="PnL" pnlHeight={220} volumeHeight={120} notice={{ label: "partial" }} />);
+    expect(recorded).toHaveLength(0);
+
+    render(<PnlEvolutionChart data={series} title="PnL" pnlHeight={220} volumeHeight={120} notice={{ label: "history unavailable" }} />);
+    expect(recorded.length).toBeGreaterThan(0);
   });
 });

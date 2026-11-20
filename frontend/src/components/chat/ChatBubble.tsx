@@ -14,6 +14,7 @@ import { ChatThread } from "@/components/chat/ChatThread";
 import { Starters, type Starter } from "@/components/chat/Starters";
 import { useBubbleResume } from "@/hooks/useBubbleResume";
 import { useChat, useSessionOptions } from "@/hooks/useChat";
+import { useConnectionLost } from "@/hooks/useConnectionLost";
 import type { ChatSlot } from "@/hooks/useChatSocket";
 import { useServer } from "@/hooks/useServer";
 import { useStarters } from "@/hooks/useStarters";
@@ -102,6 +103,9 @@ export function ChatBubble() {
   });
 
   const msgCount = slot?.messages.length ?? 0;
+  // The launcher is the only sign of the chat on most pages, so it is where a
+  // dead socket has to show while the panel is closed (FU-03).
+  const connectionLost = useConnectionLost(chat.isConnected);
 
   const facts = routeFacts(pathname, search);
   // Learned openers over the page-shaped ones — up here with the other hooks,
@@ -137,10 +141,16 @@ export function ChatBubble() {
       <button
         onClick={() => toggle(true)}
         className="fixed bottom-4 right-4 z-40 flex h-12 w-12 items-center justify-center rounded-full bg-[var(--color-primary-fill)] text-[var(--on-primary)] shadow-lg transition-opacity hover:opacity-90"
-        title="Ask about this page"
+        title={connectionLost ? "Chat is reconnecting…" : "Ask about this page"}
         aria-label="Open quick chat"
       >
         <MessageSquare className="h-5 w-5" />
+        {connectionLost && (
+          <span
+            data-testid="bubble-offline"
+            className="absolute left-0.5 top-0.5 h-2.5 w-2.5 rounded-full bg-[var(--color-yellow)] ring-2 ring-[var(--color-bg)]"
+          />
+        )}
         {unread && (
           <span className="absolute right-0.5 top-0.5 h-2.5 w-2.5 rounded-full bg-[var(--color-accent)] ring-2 ring-[var(--color-bg)]" />
         )}
@@ -222,6 +232,7 @@ export function ChatBubble() {
         agents={modelOptions}
         isStreaming={streaming}
         isQueued={chat.isSlotQueued(slotId)}
+        isConnected={chat.isConnected}
         permissionRequest={chat.permissionFor(slotId)}
         onResolvePermission={chat.resolvePermission}
         onSend={ask}

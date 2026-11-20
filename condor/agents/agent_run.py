@@ -57,6 +57,7 @@ from condor.agents.run_records import KIND_CONSULT, record_run
 from condor.preferences import resolve_custom_endpoint
 from condor.runtime import context as runtime_context
 from condor.runtime import toolsets
+from condor.runtime.timeouts import ASK_TIMED_OUT_MARK, TIMEOUTS
 from config_manager import resolve_stored_server
 
 log = logging.getLogger(__name__)
@@ -394,6 +395,16 @@ def _clip(text: str) -> str:
     )
 
 
+def ask_timeout_answer(slug: str, budget: float) -> str:
+    """What a caller is told when its ask was stopped at the budget."""
+    return (
+        f"{ASK_TIMED_OUT_MARK} Agent '{slug}' did not answer within {budget:g}s "
+        "and was stopped; nothing it was doing is still running. Do not ask "
+        "the same question again — for work this long use "
+        f'delegate(action="start", agent="{slug}", task=...) instead.'
+    )
+
+
 async def run_ask(
     slug: str,
     user_id: int,
@@ -402,6 +413,7 @@ async def run_ask(
     task: str,
     context: str = "",
     caller: str = "",
+    timeout: float | None = None,
 ) -> str:
     """Ask the Agent ``slug`` ``task`` and return its answer to a waiting caller.
 
@@ -438,7 +450,15 @@ async def run_ask(
     :func:`~condor.agents.run_records.record_run` never awaits and
     ``write_status`` takes only its per-file thread lock, so it is safe to call
     from a worker. The latency is still the ask's; the blocking never was.
+
+    **The budget is enforced here** (MC-03). ``timeout`` defaults to
+    ``TIMEOUTS.ask``; past it the engine call is cancelled, the record is
+    written ``stopped``, and the caller gets a sentence that says so instead of
+    an answer. The caller's own HTTP timeout sits above this one
+    (``TIMEOUTS.mcp_ask``) and is not a bound on the run at all: a client that
+    stops waiting does not cancel the route.
     """
+    budget = float(timeout if timeout is not None else TIMEOUTS.ask)
     run_id = f"{slug}-consult-{uuid.uuid4().hex[:8]}"
     started_at = time.time()
     # Same shape as a delegation id, and the ``-consult-`` infix is what keeps
@@ -456,18 +476,23 @@ async def run_ask(
     }
     record_run(state="running", **stamp)
 
+    # ``asyncio.timeout`` rather than ``wait_for`` so a TimeoutError raised
+    # *inside* the engine (a provider call, a tool) is still that run's own
+    # error and not mistaken for this deadline: only ``expired()`` says which.
+    deadline = asyncio.timeout(budget)
     try:
-        answer = await run_agent_to_completion(
-            slug=slug,
-            user_id=user_id,
-            chat_id=chat_id,
-            server_name=server_name,
-            task=task,
-            context=context,
-            # Depth 1: whoever answers this may not ask onward (see the flag's
-            # note on ``run_agent_to_completion``).
-            ask_target=True,
-        )
+        async with deadline:
+            answer = await run_agent_to_completion(
+                slug=slug,
+                user_id=user_id,
+                chat_id=chat_id,
+                server_name=server_name,
+                task=task,
+                context=context,
+                # Depth 1: whoever answers this may not ask onward (see the
+                # flag's note on ``run_agent_to_completion``).
+                ask_target=True,
+            )
     except asyncio.CancelledError:
         # The caller disconnected or the MCP timeout fired. A record left saying
         # "running" would read as interrupted on the next boot and as live until
@@ -484,6 +509,17 @@ async def run_ask(
         record_run(state="stopped", **stamp)
         raise
     except Exception as exc:
+        if isinstance(exc, TimeoutError) and deadline.expired():
+            # The deadline cancelled the engine call and it has unwound, so the
+            # agent is stopped, not merely abandoned. This task itself is not
+            # cancelled, so the write is offloaded like the other terminal ones.
+            await asyncio.to_thread(
+                record_run,
+                state="stopped",
+                error=f"Timed out after {budget:g}s",
+                **stamp,
+            )
+            return ask_timeout_answer(slug, budget)
         await asyncio.to_thread(record_run, state="error", error=str(exc), **stamp)
         raise
 

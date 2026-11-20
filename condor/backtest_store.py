@@ -235,6 +235,10 @@ class BacktestStore:
             if p.name != self._index_path.name and not p.name.startswith(".")
         )
         if not legacy and self.migrated:
+            # Nothing to migrate, but this is still the one sweep a quiet store
+            # gets (ST-13): the prune is otherwise hooked to ``save_result``,
+            # so payloads past retention sat on disk until the next backtest.
+            self._maybe_prune()
             return 0
 
         cutoff = time.time() - retention_days() * 86400 if retention_days() else None
@@ -566,9 +570,21 @@ def get_backtest_store() -> BacktestStore:
 
 
 def migrate_backtest_archive() -> int:
-    """Entry point for the boot-time background migration (``main.py``)."""
+    """Entry point for the boot-time background migration (``main.py``).
+
+    Also the boot-time retention sweep for the run-history store (ST-13), whose
+    prune is likewise hooked to its writes only. It rides this hook because it
+    is the one that already runs off the event loop at startup.
+    """
     try:
         return get_backtest_store().migrate()
     except Exception:
         logger.warning("Backtest archive migration failed", exc_info=True)
         return 0
+    finally:
+        try:
+            from condor.run_history_store import prune_run_history_if_due
+
+            prune_run_history_if_due()
+        except Exception:
+            logger.warning("Run-history retention sweep failed", exc_info=True)

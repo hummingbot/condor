@@ -328,12 +328,18 @@ class SwapWatch:
         rows.sort(key=lambda r: -(r["unverifiable_for_seconds"] or 0.0))
         return rows
 
-    def alerts(self, swaps: Any, now: Optional[float] = None) -> list[dict]:
+    def alerts(
+        self, swaps: Any, now: Optional[float] = None, *, full_hash: bool = False
+    ) -> list[dict]:
         """Only the swaps past the threshold, each with the line to show.
 
         The alert is the condition row plus a ``message`` naming the duration.
         An operator or an agent reading only the message still learns that the
         outcome is *unknown* rather than lost, and what to do about it.
+
+        ``full_hash`` is for the agent path: the message tells its reader to
+        call ``resolve_swap``, which takes the whole hash, so a message that
+        abbreviates it names a call that cannot be made from it.
         """
         alerting = [
             row
@@ -341,19 +347,25 @@ class SwapWatch:
             if row["condition"] == "unverifiable"
         ]
         for row in alerting:
-            row["message"] = describe_alert(row)
+            row["message"] = describe_alert(row, full_hash=full_hash)
         return alerting
 
 
-def describe_alert(row: dict) -> str:
+def describe_alert(row: dict, *, full_hash: bool = False) -> str:
     """The alert line for one unverifiable swap.
 
     Deliberately free of the word *failed*. The swap may have landed on-chain
     and nobody has been able to check — the whole point of #278's rule that a
     swap is never aged out on a poll that could not check it.
+
+    The hash is abbreviated for a human glancing at a card, and whole when
+    ``full_hash`` is set — a model can only pass on what it was shown.
     """
     tx_hash = str(row.get("transaction_hash") or "")
-    short = f"{tx_hash[:10]}…" if len(tx_hash) > 10 else tx_hash or "(no hash)"
+    if full_hash:
+        short = tx_hash or "(no hash)"
+    else:
+        short = f"{tx_hash[:10]}…" if len(tx_hash) > 10 else tx_hash or "(no hash)"
     venue = " ".join(
         part for part in (row.get("connector") or "", row.get("network") or "") if part
     )

@@ -628,7 +628,7 @@ const ROUTES: {
     // `Bots.tsx` redirects them into (FEAT-086). It is also the label
     // `PerfBrowser` contributes under, so the cache's half of this screen and
     // the reader's half render as one screen instead of two.
-    facts: () => ({ label: "Activity" }),
+    facts: () => ({ label: "Bots" }),
     onScreen: (_p, _tab, qc) => {
       const data = fresh<BotsPageResponse>(qc, ["bots"]);
       if (!data) return undefined;

@@ -6,9 +6,11 @@ so listing a history needs no per-file reads. No sqlite anywhere in this repo,
 and a store that holds a few hundred short records whose main consumer reads
 one record at a time does not earn the first one.
 
-The store keeps the **full** text of every run — code, stdout, result,
-traceback. Clipping for a model's context is the caller's job, so a snippet
-that failed can always be read back whole and corrected.
+The store keeps every run as the runner recorded it — code, stdout, result,
+traceback — and does no clipping of its own. Clipping for a model's context is
+the caller's job, so a snippet that failed can always be read back and
+corrected. The runner bounds what it records (``code_runner.OUTPUT_HEAD`` /
+``OUTPUT_TAIL``), and retention here is bounded by count *and* by bytes.
 """
 
 from __future__ import annotations
@@ -30,6 +32,11 @@ logger = logging.getLogger(__name__)
 # credential and an unbounded pile of them on disk (see FEAT-047 risks).
 MAX_RUNS = 300
 
+# The same bound in bytes. A count alone lets 300 runs at the runner's output
+# cap hold roughly a hundred megabytes of whatever snippets printed; the newest
+# run is always kept, whatever its size (RT-08).
+MAX_TOTAL_BYTES = 32 * 1024 * 1024
+
 # Ids are generated here, but they also arrive from a tool argument — anything
 # that is not this shape never becomes a path.
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -47,6 +54,10 @@ _INDEX_FIELDS = (
     "duration_ms",
     "user_id",
 )
+
+# The run file's size on disk, carried in the index beside the meta so the
+# byte budget never stats 300 files per save. Not part of a run's record.
+_BYTES_KEY = "bytes"
 
 
 @dataclass
@@ -104,9 +115,12 @@ class CodeRunStore:
     def save(self, run: CodeRun) -> None:
         """Write the run, put it at the head of the index, evict past the cap."""
         data = run.to_dict()
-        self._write_json(self._run_path(run.id), data)
+        path = self._run_path(run.id)
+        self._write_json(path, data)
+        entry = {k: data.get(k) for k in _INDEX_FIELDS}
+        entry[_BYTES_KEY] = self._size_on_disk(path)
         self._index = [e for e in self._index if e.get("id") != run.id]
-        self._index.insert(0, {k: data.get(k) for k in _INDEX_FIELDS})
+        self._index.insert(0, entry)
         self._evict()
         self._persist_index()
 
@@ -145,7 +159,10 @@ class CodeRunStore:
             entries = [
                 e for e in entries if user_id and (e.get("user_id") or 0) == user_id
             ]
-        return [dict(e) for e in entries[: max(0, limit)]]
+        return [
+            {k: v for k, v in e.items() if k != _BYTES_KEY}
+            for e in entries[: max(0, limit)]
+        ]
 
     # ── internals ──
 
@@ -160,15 +177,42 @@ class CodeRunStore:
         return self._dir / f"{run_id}.json"
 
     def _evict(self) -> None:
-        """Drop the oldest runs past the cap — index entry *and* file."""
-        for entry in self._index[MAX_RUNS:]:
+        """Drop the oldest runs past either cap — index entry *and* file.
+
+        Newest first, keeping entries while both the count and the running
+        byte total hold. The newest run is kept unconditionally: a single
+        record over the byte budget must still be readable back.
+        """
+        keep = 0
+        total = 0
+        for entry in self._index[:MAX_RUNS]:
+            total += self._entry_bytes(entry)
+            if keep and total > MAX_TOTAL_BYTES:
+                break
+            keep += 1
+        for entry in self._index[keep:]:
             path = self._run_path(entry.get("id", ""))
             if path is not None and path.exists():
                 try:
                     path.unlink()
                 except OSError:
                     logger.warning("Could not evict code run file %s", path)
-        del self._index[MAX_RUNS:]
+        del self._index[keep:]
+
+    def _entry_bytes(self, entry: dict) -> int:
+        """An index entry's size, measured once for one written before RT-08."""
+        size = entry.get(_BYTES_KEY)
+        if not isinstance(size, int):
+            size = self._size_on_disk(self._run_path(entry.get("id", "")))
+            entry[_BYTES_KEY] = size
+        return size
+
+    @staticmethod
+    def _size_on_disk(path: Path | None) -> int:
+        try:
+            return path.stat().st_size if path is not None else 0
+        except OSError:
+            return 0
 
     def _load_index(self) -> None:
         if not self._index_path.exists():

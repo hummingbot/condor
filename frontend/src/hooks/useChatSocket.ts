@@ -11,7 +11,7 @@ import {
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { addUsage } from "@/lib/usage";
-import { namesATool, toolCallState } from "@/lib/formatters";
+import { INTERRUPTED_STATUS, namesATool, toolCallState } from "@/lib/formatters";
 import { collectViewFacts, renderViewBlock } from "@/lib/viewFacts";
 import { WS_AUTH_SUBPROTOCOL } from "@/lib/websocket";
 
@@ -184,6 +184,16 @@ export interface ChatMessage {
    * for one another by a renderer that only sees a URL.
    */
   attachments?: ChatAttachment[];
+  /**
+   * Where a user turn stands with the wire, when it is not simply sent (FU-03).
+   *
+   * `queued` — the socket was down when it was written, so the frame is
+   * waiting for the reconnect. `unsent` — it waited too long (or the queue was
+   * full) and was dropped rather than replayed: an instruction that reaches a
+   * trading agent minutes after it was typed is not the instruction the user
+   * gave. Absent on everything that went out, and on everything hydrated.
+   */
+  delivery?: "queued" | "unsent";
 }
 
 /** One picture on a turn, as the transcript renders it. */
@@ -379,20 +389,47 @@ function closeStream(msgs: ChatMessage[]): ChatMessage[] {
  *  is over: rewriting it to `completed` here told the user a tool ran that they
  *  had said no to. It reads as terminal there, so it is left exactly as the
  *  bridge reported it, which is also what the transcript on disk holds. */
-function settleToolCalls(msgs: ChatMessage[]): ChatMessage[] {
+function settleToolCalls(
+  msgs: ChatMessage[],
+  status: string = "completed",
+): ChatMessage[] {
   return msgs.map((m) =>
     m.toolCalls.some((tc) => toolCallState(tc.status) === "pending")
       ? {
           ...m,
           toolCalls: m.toolCalls.map((tc) =>
-            toolCallState(tc.status) === "pending"
-              ? { ...tc, status: "completed" }
-              : tc,
+            toolCallState(tc.status) === "pending" ? { ...tc, status } : tc,
           ),
         }
       : m,
   );
 }
+
+/** The settle for a turn the user cut short — Stop, or a message sent over it
+ *  (FU-06). The call was in flight when the turn was abandoned, so its outcome
+ *  is not known here: `completed` put a green check on an order that may or
+ *  may not have gone out. It ends as `interrupted` instead, which is terminal
+ *  (nothing spins) without claiming a result. */
+function interruptToolCalls(msgs: ChatMessage[]): ChatMessage[] {
+  return settleToolCalls(msgs, INTERRUPTED_STATUS);
+}
+
+/** A frame waiting for the socket, and the bubble it belongs to if any. */
+interface QueuedFrame {
+  msg: Record<string, unknown>;
+  /** `Date.now()` when it was queued. */
+  at: number;
+  slotId?: string;
+  messageId?: string;
+}
+
+/** How long a queued instruction is still worth sending (FU-03). Long enough
+ *  to ride out a reconnect, short enough that nothing typed before a sleep or
+ *  a long outage reaches the agent as if it had just been said. */
+export const QUEUED_FRAME_TTL_MS = 30_000;
+
+/** The queued actions that go stale: the ones that tell an agent to act. */
+const EXPIRING_ACTIONS = new Set(["send_message", "resolve_permission"]);
 
 /** Now, in the epoch seconds the transcript is recorded in. */
 function nowTs(): number {
@@ -670,8 +707,15 @@ export function useChatSocket() {
   // work without a staging area: the POST writes *inside* the conversation
   // directory, and the conversation directory is created by the spawn this
   // queue is waiting for.
+  //
+  // Each entry also keeps when it was typed (`at`): a prompt held here across
+  // an outage is the same instruction a frame in `unsent` is, and goes stale on
+  // the same clock (FU-03) — see `flushUnsent`.
   const outbox = useRef<
-    Record<string, { text: string; view: string; files?: File[] }[]>
+    Record<
+      string,
+      { id: string; text: string; view: string; files?: File[]; at: number }[]
+    >
   >({});
   // A tab opened optimistically is renamed on session_started: the client_ref
   // it was started under becomes the backend's slot id. The workspace follows
@@ -1037,16 +1081,96 @@ export function useChatSocket() {
   // opens the panel and starts a session in the same click, so the first frame
   // routinely predates the connection. Capped, because a socket that never
   // opens must not grow a backlog.
-  const unsent = useRef<Record<string, unknown>[]>([]);
+  //
+  // Each entry remembers when it was queued, and which bubble it is the wire
+  // half of, so the reconnect can tell a frame that is still what the user
+  // meant from one that has gone stale (FU-03) — see `flushUnsent`.
+  const unsent = useRef<QueuedFrame[]>([]);
   const MAX_UNSENT = 20;
+  // When the socket this hook had went away, or null while it is up (and
+  // before the first connect). What a queued instruction's age is measured
+  // from when it was typed *before* the drop — see `flushUnsent`.
+  const socketDownAt = useRef<number | null>(null);
 
-  const send = useCallback((msg: Record<string, unknown>) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(msg));
-      return;
-    }
-    if (unsent.current.length < MAX_UNSENT) unsent.current.push(msg);
-  }, []);
+  const send = useCallback(
+    (
+      msg: Record<string, unknown>,
+      bubble?: { slotId: string; messageId: string },
+    ): "sent" | "queued" | "dropped" => {
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify(msg));
+        return "sent";
+      }
+      if (unsent.current.length >= MAX_UNSENT) return "dropped";
+      unsent.current.push({ msg, at: Date.now(), ...bubble });
+      return "queued";
+    },
+    [],
+  );
+
+  /** Say on a user bubble where its frame stands; `undefined` is "it went". */
+  const markDelivery = useCallback(
+    (slotId: string, messageId: string, delivery: ChatMessage["delivery"]) => {
+      updateSlotMessages(slotId, (msgs) =>
+        msgs.some((m) => m.id === messageId && m.delivery !== delivery)
+          ? msgs.map((m) => (m.id === messageId ? { ...m, delivery } : m))
+          : msgs,
+      );
+    },
+    [updateSlotMessages],
+  );
+
+  /**
+   * Send what was queued while the socket was down — except what went stale.
+   *
+   * A prompt or an approval is an instruction to an agent that can trade, and
+   * it was given about the moment it was typed in. Replayed after a laptop
+   * slept through the afternoon it is a different instruction, so past
+   * `QUEUED_FRAME_TTL_MS` those two are dropped: the prompt's bubble says it
+   * was not sent, and an approval that is somehow still pending comes back on
+   * screen through `replayPendingConfirmations`. Everything else — opening a
+   * session, and above all Stop — is still sent however late.
+   *
+   * The prompts held in `outbox` for a tab whose spawn has not answered yet
+   * are judged here too, on the same clock: a new chat opened offline queues
+   * its `start_session` (which is still sent), and the prompt typed into it
+   * would otherwise go out on `session_started` however old it was. Judging
+   * them at the reconnect, not at the spawn, keeps a slow spawn on a live
+   * socket from costing the user a prompt that never sat through an outage.
+   *
+   * The age that counts is the time spent *offline*, so the clock starts at
+   * whichever came later: the prompt being typed, or the socket going down. A
+   * prompt that had already waited a minute on a slow spawn when the socket
+   * blipped for a second was online for all but that second — measured from
+   * when it was typed it was thrown away as stale after any reconnect.
+   */
+  const flushUnsent = useCallback(
+    (ws: WebSocket) => {
+      const queued = unsent.current;
+      unsent.current = [];
+      const now = Date.now();
+      const downAt = socketDownAt.current;
+      socketDownAt.current = null;
+      const isStale = (at: number) =>
+        now - Math.max(at, downAt ?? at) > QUEUED_FRAME_TTL_MS;
+      for (const { msg, at, slotId, messageId } of queued) {
+        const stale = EXPIRING_ACTIONS.has(String(msg.action)) && isStale(at);
+        if (!stale) ws.send(JSON.stringify(msg));
+        if (slotId && messageId) {
+          markDelivery(slotId, messageId, stale ? "unsent" : undefined);
+        }
+      }
+      for (const [tabId, held] of Object.entries(outbox.current)) {
+        const fresh = held.filter((entry) => !isStale(entry.at));
+        for (const entry of held) {
+          if (isStale(entry.at)) markDelivery(tabId, entry.id, "unsent");
+        }
+        if (fresh.length) outbox.current[tabId] = fresh;
+        else delete outbox.current[tabId];
+      }
+    },
+    [markDelivery],
+  );
 
   /**
    * Upload whatever was attached, then send the frame that names it.
@@ -1069,6 +1193,8 @@ export function useChatSocket() {
       text: string,
       view: string,
       files?: File[],
+      /** The optimistic bubble this frame is the wire half of. */
+      messageId?: string,
     ) => {
       let ids: string[] = [];
       if (files?.length) {
@@ -1087,15 +1213,23 @@ export function useChatSocket() {
         }
       }
       setSentSlots((prev) => (prev[slotId] ? prev : { ...prev, [slotId]: true }));
-      send({
-        action: "send_message",
-        slot_id: slotId,
-        text,
-        view_context: view,
-        ...(ids.length ? { attachments: ids } : {}),
-      });
+      const outcome = send(
+        {
+          action: "send_message",
+          slot_id: slotId,
+          text,
+          view_context: view,
+          ...(ids.length ? { attachments: ids } : {}),
+        },
+        messageId ? { slotId, messageId } : undefined,
+      );
+      // The bubble is already on screen and looks sent. If the socket is down
+      // it says so itself, rather than looking identical to one that went.
+      if (messageId && outcome !== "sent") {
+        markDelivery(slotId, messageId, outcome === "queued" ? "queued" : "unsent");
+      }
     },
-    [appendSystemNote, send],
+    [appendSystemNote, markDelivery, send],
   );
 
   /**
@@ -1147,6 +1281,9 @@ export function useChatSocket() {
     const ws = wsRef.current;
     wsRef.current = null;
     socketToken.current = null;
+    // Its `onclose` is ignored from here on (it is no longer the hook's
+    // socket), so this is where a socket closed on purpose is noted as down.
+    if (ws) socketDownAt.current ??= Date.now();
     ws?.close();
   }, []);
 
@@ -1187,9 +1324,7 @@ export function useChatSocket() {
       needsResync.current = hasConnected.current;
       hasConnected.current = true;
       setIsConnected(true);
-      const queued = unsent.current;
-      unsent.current = [];
-      for (const msg of queued) ws.send(JSON.stringify(msg));
+      flushUnsent(ws);
       // The roster that follows says which conversations are alive; it says
       // nothing about which of them is holding a tool call waiting on a click.
       void replayPendingConfirmations();
@@ -1200,6 +1335,8 @@ export function useChatSocket() {
       // socket may report the connection down or ask for another attempt.
       if (wsRef.current !== ws) return;
       setIsConnected(false);
+      // The first close of an outage, not each failed retry after it.
+      socketDownAt.current ??= Date.now();
       if (!shouldConnect.current) return;
       reconnectTimer.current = setTimeout(() => connect(), reconnectDelay.current);
       reconnectDelay.current = Math.min(
@@ -1214,7 +1351,7 @@ export function useChatSocket() {
         /* ignore */
       }
     };
-  }, [token, closeSocket, replayPendingConfirmations]);
+  }, [token, closeSocket, flushUnsent, replayPendingConfirmations]);
 
   const disconnect = useCallback(() => {
     shouldConnect.current = false;
@@ -1256,7 +1393,9 @@ export function useChatSocket() {
             (
               slotsRef.current.find((s) => s.info.slot_id === slotId)?.messages ?? []
             )
-              .filter((m) => !m.open)
+              // A bubble that was never sent is in no transcript: replacing
+              // it would erase the only sign the message did not go (FU-03).
+              .filter((m) => !m.open && m.delivery !== "unsent")
               .map((m) => m.id),
           )
         : null;
@@ -1605,8 +1744,10 @@ export function useChatSocket() {
             // Sequential, not `forEach`: an upload is an await, and racing two
             // of them would let the second message overtake the first.
             void (async () => {
-              for (const { text, view, files } of queued) {
-                await uploadAndSend(newSlot.slot_id, convId, text, view, files);
+              for (const { id, text, view, files } of queued) {
+                // Held through an outage it read "queued"; it is going now.
+                markDelivery(newSlot.slot_id, id, undefined);
+                await uploadAndSend(newSlot.slot_id, convId, text, view, files, id);
               }
             })();
           }
@@ -1730,7 +1871,18 @@ export function useChatSocket() {
                       tc.tool_call_id === tcId
                         ? {
                             ...tc,
-                            status: status || tc.status,
+                            // A call the user cut off stays cut off unless the
+                            // server names how it actually ended: a straggling
+                            // `in_progress` would put it back in flight, for
+                            // the turn's closing settle to tick green (FU-06).
+                            status:
+                              status &&
+                              !(
+                                tc.status === INTERRUPTED_STATUS &&
+                                toolCallState(status) === "pending"
+                              )
+                                ? status
+                                : tc.status,
                             title: title || tc.title,
                           }
                         : tc,
@@ -1780,7 +1932,7 @@ export function useChatSocket() {
           });
           flushChunks(slotId);
           updateSlotMessages(slotId, (prev) => {
-            const msgs = settleToolCalls(prev);
+            const msgs = interruptToolCalls(prev);
             // The partial is the last thing the agent said. The user's new
             // message is already below it — `sendMessage` appended it before
             // the wire even carried it — so this walks back to find it.
@@ -1862,7 +2014,7 @@ export function useChatSocket() {
             // so the settle below sees the flushed transcript.
             flushChunks(slotId);
             // Mark any in-flight tool calls as completed so the spinner stops
-            updateSlotMessages(slotId, settleToolCalls);
+            updateSlotMessages(slotId, (msgs) => settleToolCalls(msgs));
             // Only this conversation ended. Another tab may still be
             // mid-answer, and its composer stays locked until its own turn is
             // done.
@@ -2011,6 +2163,7 @@ export function useChatSocket() {
       bufferChunk,
       flushChunks,
       hydrateSlot,
+      markDelivery,
       noteFrame,
       prewarmLatest,
       queryClient,
@@ -2043,7 +2196,9 @@ export function useChatSocket() {
         local: true,
       }));
       updateSlotMessages(slotId, (msgs) => [
-        ...settleToolCalls(msgs),
+        // Whatever was still in flight is cut off by this message, not
+        // finished by it.
+        ...interruptToolCalls(msgs),
         {
           id,
           role: "user" as const,
@@ -2066,7 +2221,18 @@ export function useChatSocket() {
       if (slot?.pending) {
         // The `File`s wait here with the words. Uploading now would write into a
         // conversation directory the spawn has not created yet.
-        (outbox.current[slotId] ||= []).push({ text, view, files });
+        (outbox.current[slotId] ||= []).push({
+          id,
+          text,
+          view,
+          files,
+          at: Date.now(),
+        });
+        // Offline, the bubble says it is waiting, as one in `unsent` does;
+        // the drain on session_started sends it and clears the mark.
+        if (wsRef.current?.readyState !== WebSocket.OPEN) {
+          markDelivery(slotId, id, "queued");
+        }
         return;
       }
 
@@ -2079,9 +2245,10 @@ export function useChatSocket() {
         text,
         view,
         files,
+        id,
       );
     },
-    [flushChunks, updateSlotMessages, uploadAndSend],
+    [flushChunks, markDelivery, updateSlotMessages, uploadAndSend],
   );
 
   /**
@@ -2285,7 +2452,19 @@ export function useChatSocket() {
 
   const abortPrompt = useCallback(
     (slotId: string) => {
-      send({ action: "abort_prompt", slot_id: slotId });
+      // One Stop is enough to wait for the socket: pressing it again while
+      // offline must not fill the queue with copies.
+      const waiting = unsent.current.some(
+        (q) => q.msg.action === "abort_prompt" && q.msg.slot_id === slotId,
+      );
+      const outcome = waiting
+        ? "queued"
+        : send({ action: "abort_prompt", slot_id: slotId });
+      // With the socket down nothing has been stopped — the agent runs on
+      // until the frame gets there. Showing "stopped" now would be a claim
+      // about a turn this tab cannot see (FU-03); the turn's real ending
+      // arrives with the reconnect.
+      if (outcome !== "sent") return;
       // What already arrived is part of the transcript even though the user
       // stopped the rest of it; the turn ends with it.
       flushChunks(slotId);
@@ -2293,8 +2472,9 @@ export function useChatSocket() {
       // stuck if the backend's prompt_done event is lost or delayed. Aborting
       // one conversation says nothing about the others.
       stopStreaming(slotId);
-      // Mark any in-flight tool calls as completed
-      updateSlotMessages(slotId, settleToolCalls);
+      // In-flight tool calls stop spinning — as stopped, not as completed:
+      // nobody here knows how far they got.
+      updateSlotMessages(slotId, interruptToolCalls);
     },
     [flushChunks, send, stopStreaming, updateSlotMessages],
   );

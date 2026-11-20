@@ -1294,10 +1294,31 @@ export interface PerfTotals {
   closeTotal: number;
   /** Carried through only for a fold of exactly one leaf; never averaged. */
   returnPct?: number;
+  /**
+   * The quote currencies that had **no rate**, sorted — empty when every
+   * figure above is in display currency.
+   *
+   * A leaf whose quote cannot be converted is still added in, at face value:
+   * dropping it would understate the fold by a whole controller. But a total
+   * that silently mixes BRL into dollars is overstated by the whole FX rate,
+   * so the fold names what it could not convert and the caller must say so
+   * (or withhold the figures while the rates are still loading).
+   */
+  unconverted: string[];
 }
 
-/** Converts a quote-denominated value into display currency. */
-export type ConvertQuote = (value: number, pair: string) => number;
+/**
+ * Converts a quote-denominated value into display currency.
+ *
+ * Returns a bare number because that is what a sum wants — which is exactly
+ * how "could not convert" used to get lost. So the converter also answers the
+ * question directly: `unconverted(pair)` is the quote currency the pair's
+ * values are *still in* when there is no rate, or `null` when they convert.
+ * Absent on a converter that always converts (a test's identity, say).
+ */
+export type ConvertQuote = ((value: number, pair: string) => number) & {
+  unconverted?: (pair: string) => string | null;
+};
 
 /**
  * `ControllerBrowser`'s `totals`, `scopeFacts` and `closeTypeCounts` in one
@@ -1326,9 +1347,20 @@ export function foldLeaves(leaves: PerfLeaf[], cv: ConvertQuote, now: number): P
   let anyRunning = false;
   const bots = new Set<string>();
   const merged: Record<string, number> = {};
+  const unconverted = new Set<string>();
 
   for (const leaf of leaves) {
     const pair = leaf.pair;
+    // Zero-valued leaves are left out: nothing to convert cannot be
+    // misconverted, and naming them would bury the quotes that matter.
+    if (
+      cv.unconverted &&
+      (leaf.net !== 0 || leaf.realized !== 0 || leaf.unrealized !== 0 ||
+        leaf.volume !== 0 || leaf.fees !== 0 || leaf.capital > 0)
+    ) {
+      const stuck = cv.unconverted(pair);
+      if (stuck) unconverted.add(stuck);
+    }
     realized += cv(leaf.realized, pair);
     unrealized += cv(leaf.unrealized, pair);
     net += cv(leaf.net, pair);
@@ -1382,5 +1414,6 @@ export function foldLeaves(leaves: PerfLeaf[], cv: ConvertQuote, now: number): P
     closeTypes: Object.entries(merged).sort((a, b) => b[1] - a[1]),
     closeTotal,
     returnPct: leaves.length === 1 ? leaves[0].returnPct : undefined,
+    unconverted: [...unconverted].sort(),
   };
 }

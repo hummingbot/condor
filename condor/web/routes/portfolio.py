@@ -22,7 +22,7 @@ from condor.web.models import (
     PortfolioResponse,
     WebUser,
 )
-from condor.web.routes._errors import upstream_error
+from condor.web.routes._errors import offline_hint, upstream_error
 from config_manager import get_config_manager
 
 logger = logging.getLogger(__name__)
@@ -152,15 +152,34 @@ async def get_portfolio_history(
     # The raw snapshots are the same regardless of *breakdown* (parsing happens
     # below), so the cache key is the range alone. SDS coalesces concurrent
     # reads of the same expired key into one backend fetch.
+    _, interval = PORTFOLIO_HISTORY_RANGES[range]
+
+    # A failed read is not an empty history. SDS hands back the last good
+    # value when a fetch fails, so ``None`` here means the server did not
+    # answer and never has for this range — said in band, as the bots route
+    # says it, rather than as an empty ``points`` the chart reads as "no
+    # history" (FP-10).
     try:
         history = await get_server_data_service().get_or_fetch(
             name, ServerDataType.PORTFOLIO_HISTORY, range_key=range
         )
     except Exception as e:
         logger.warning("Failed to get portfolio history: %s", e)
-        history = None
-
-    _, interval = PORTFOLIO_HISTORY_RANGES[range]
+        return PortfolioHistoryResponse(
+            server=name,
+            points=[],
+            interval=interval,
+            server_online=False,
+            error_hint=offline_hint(e),
+        )
+    if history is None:
+        return PortfolioHistoryResponse(
+            server=name,
+            points=[],
+            interval=interval,
+            server_online=False,
+            error_hint="Unable to reach server",
+        )
 
     logger.debug("Portfolio history response shape: %s", type(history))
     if isinstance(history, dict):

@@ -30,7 +30,7 @@ from condor.web.models import (
     WebUser,
 )
 from condor.web.routes._deeds import record_ui_deed
-from condor.web.routes._errors import upstream_error
+from condor.web.routes._errors import offline_hint, server_client, upstream_error
 from config_manager import get_config_manager
 
 logger = logging.getLogger(__name__)
@@ -270,7 +270,7 @@ async def list_bots(name: str, user: WebUser = Depends(require_server_access)):
         logger.warning("Failed to fetch bots from '%s': %s", name, e)
         return BotsPageResponse(
             server_online=False,
-            error_hint=f"Connection error: {e}",
+            error_hint=offline_hint(e),
         )
 
     if result is None:
@@ -298,7 +298,7 @@ async def get_bot(
 
     import asyncio
 
-    client = await cm.get_client(name)
+    client = await server_client(cm, name)
 
     try:
         result = await client.bot_orchestration.get_bot_status(bot_id)
@@ -352,7 +352,7 @@ async def list_controller_configs(
 
     import asyncio
 
-    client = await cm.get_client(name)
+    client = await server_client(cm, name)
 
     # Fetch controller types and saved configs in parallel
     async def _get_types():
@@ -404,7 +404,7 @@ async def get_controller_config(
 ):
     cm = get_config_manager()
 
-    client = await cm.get_client(name)
+    client = await server_client(cm, name)
     try:
         result = await client.controllers.get_controller_config(config_id)
     except Exception as e:
@@ -439,7 +439,7 @@ async def update_controller_config(
     """
     cm = get_config_manager()
 
-    client = await cm.get_client(name)
+    client = await server_client(cm, name)
 
     # If yaml_content is provided, parse it as the full config
     yaml_content = body.pop("yaml_content", None)
@@ -512,7 +512,7 @@ async def get_controller_source(
     """Fetch the Python source of a controller."""
     cm = get_config_manager()
 
-    client = await cm.get_client(name)
+    client = await server_client(cm, name)
     try:
         result = await client.controllers.get_controller(
             controller_type, controller_name
@@ -562,7 +562,7 @@ async def update_controller_source(
     if not source or not isinstance(source, str):
         raise HTTPException(status_code=400, detail="Missing 'source' string")
 
-    client = await cm.get_client(name)
+    client = await server_client(cm, name)
     try:
         result = await client.controllers.create_or_update_controller(
             controller_type, controller_name, {"content": source}
@@ -598,7 +598,7 @@ async def get_controller_config_template(
     """Fetch the config template/schema for a controller."""
     cm = get_config_manager()
 
-    client = await cm.get_client(name)
+    client = await server_client(cm, name)
     try:
         result = await client.controllers.get_controller_config_template(
             controller_type, controller_name
@@ -648,7 +648,7 @@ async def create_controller_config(
         except yaml.YAMLError as e:
             raise HTTPException(status_code=400, detail=f"Invalid YAML: {e}")
 
-    client = await cm.get_client(name)
+    client = await server_client(cm, name)
     try:
         # Strip internal fields like _config_name and normalize stringified enum
         # values (e.g. "PositionMode.ONEWAY" -> "ONEWAY") before saving.
@@ -679,7 +679,7 @@ async def delete_controller_config(
     """Delete a saved controller config."""
     cm = get_config_manager()
 
-    client = await cm.get_client(name)
+    client = await server_client(cm, name)
     try:
         result = await client.controllers.delete_controller_config(config_id)
     except Exception as e:
@@ -706,7 +706,7 @@ async def delete_controller(
     """Delete a controller."""
     cm = get_config_manager()
 
-    client = await cm.get_client(name)
+    client = await server_client(cm, name)
     try:
         result = await client.controllers.delete_controller(
             controller_type, controller_name
@@ -739,7 +739,7 @@ async def deploy_bot_endpoint(
 ):
     cm = get_config_manager()
 
-    client = await cm.get_client(name)
+    client = await server_client(cm, name)
 
     from mcp_servers.hummingbot_api.tools.controllers import deploy_bot
 
@@ -858,7 +858,7 @@ async def start_controllers_endpoint(
 ):
     cm = get_config_manager()
 
-    client = await cm.get_client(name)
+    client = await server_client(cm, name)
 
     from mcp_servers.hummingbot_api.tools.bot_management import manage_bot_execution
 
@@ -894,7 +894,7 @@ async def update_bot_controller_config_endpoint(
     """Update a controller config inside a running bot in real-time."""
     cm = get_config_manager()
 
-    client = await cm.get_client(name)
+    client = await server_client(cm, name)
 
     try:
         # Fetch current bot controller config to merge partial updates

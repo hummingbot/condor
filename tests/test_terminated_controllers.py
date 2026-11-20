@@ -408,7 +408,9 @@ def test_an_unreachable_server_is_said_to_be_offline_rather_than_empty(monkeypat
 
     out = _route(Broken([], RAW_RUNS), monkeypatch)
     assert out.server_online is False
-    assert "boom" in (out.error_hint or "")
+    # The hint says what happened, never the exception's own text (WR-09).
+    assert "unreachable" in (out.error_hint or "")
+    assert "boom" not in (out.error_hint or "")
     assert out.controllers == []
 
 

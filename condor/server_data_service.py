@@ -312,6 +312,19 @@ class FetchSpec:
 
 _POLL_TICK = 1  # seconds between poll loop snapshots
 _CLEANUP_INTERVAL = 300  # clean stale entries every 5 min
+_SKIP_LOG_INTERVAL = 60  # at most one rate-limit-skip warning per server per minute
+
+
+# Consecutive failures before a key counts as "in an outage" and is left alone
+# for its backoff window. Below this a failure is a blip: the poller retries on
+# its normal cadence and a read re-fetches. One threshold for both, so a read
+# never gives up on a key earlier than the poller does.
+_ERROR_BACKOFF_AFTER = 3
+
+
+def _error_backoff(entry: CacheEntry) -> float:
+    """Seconds to leave a failing key alone after its last error."""
+    return min(60, 2**entry.consecutive_errors)
 
 
 class ServerDataService:
@@ -327,6 +340,9 @@ class ServerDataService:
         # In-flight fetches per key (single-flight coalescing). Per-instance, so
         # a second ServerDataService in a test never shares one.
         self._inflight = SingleFlight()
+        # Bumped by invalidate(): a fetch that started under an older
+        # generation must not write its (pre-mutation) answer back as fresh.
+        self._generations: Dict[Tuple[str, ServerDataType], int] = {}
         self._running = False
         self._last_cleanup = time.time()
         # Sync listeners (e.g. WebSocketManager broadcasts)
@@ -335,6 +351,15 @@ class ServerDataService:
         # can't cancel them mid-flight (the event loop only keeps a weak
         # reference). Entries auto-remove on completion.
         self._callback_tasks = TaskSet(logger, "SDS callback error for %s: %s")
+        # One tracked task per key the poller is refreshing right now. The
+        # tick only *starts* these and never awaits them, so a slow or hung
+        # fetch delays its own key and nothing else.
+        self._poll_fetches: Dict[CacheKey, asyncio.Task] = {}
+        self._poll_fetch_tasks = TaskSet(logger, "SDS poll fetch error for %s: %s")
+        # Poll fetches dropped because the server's rate budget was spent:
+        # running total per server, plus what the last warning already covered.
+        self._rate_limit_skips: Dict[str, int] = {}
+        self._skips_logged: Dict[str, Tuple[float, int]] = {}
 
     # ------ Fetch registry ------
 
@@ -467,6 +492,16 @@ class ServerDataService:
         3. a *failed* fetch, which returns the previous value at whatever age it
            has — or ``None`` if there never was one.
 
+        Once a key that already holds a value has failed
+        ``_ERROR_BACKOFF_AFTER`` times in a row (the poller's own threshold) and
+        is inside its error backoff window (``min(60, 2**consecutive_errors)``
+        seconds after the last failure), the previous value is returned
+        *without* fetching: with the server hanging rather than refusing, every
+        read would otherwise block for the full client timeout only to return
+        that same value. A first or second failure is a blip and the next read
+        still re-fetches, so one dropped request does not leave reads stale
+        after the server is answering again.
+
         The third case is silent and unbounded: nothing here caps how old the
         returned value may be, and a key with a live subscriber is never evicted
         by :meth:`_cleanup_stale`, so with the API server down this keeps handing
@@ -482,6 +517,19 @@ class ServerDataService:
         cached = self.get(server, data_type, **params)
         if cached is not None:
             return cached
+
+        # Fail fast during an outage: the fetch keeps failing, so hand back the
+        # last good value now instead of paying another timeout for it. Only
+        # from the poller's own threshold on -- a single blip still re-fetches.
+        # An error-only entry (no value yet) is still retried on every read.
+        entry = self._cache.get(key)
+        if (
+            entry is not None
+            and entry.fetched_at > 0
+            and entry.consecutive_errors >= _ERROR_BACKOFF_AFTER
+            and time.time() - entry.last_error_at < _error_backoff(entry)
+        ):
+            return entry.value
 
         # Fetch fresh
         return await self._fetch_and_cache(key)
@@ -527,6 +575,7 @@ class ServerDataService:
         ]
         for k in keys_to_remove:
             del self._cache[k]
+        self._supersede_inflight(server, data_types)
         if keys_to_remove:
             logger.debug(
                 "SDS invalidated %d entries for %s: %s",
@@ -540,11 +589,29 @@ class ServerDataService:
         keys_to_remove = [k for k in self._cache if k.server == server]
         for k in keys_to_remove:
             del self._cache[k]
+        self._supersede_inflight(server, tuple(ServerDataType))
         logger.info(
             "SDS invalidated all cache for server %s (%d entries)",
             server,
             len(keys_to_remove),
         )
+
+    def _supersede_inflight(
+        self, server: str, data_types: Tuple[ServerDataType, ...]
+    ) -> None:
+        """Make an invalidation win over fetches that are already in flight.
+
+        Deleting the entry is not enough: a request that left before the
+        mutation landed would still be joined by the very next reader, and
+        would then write its pre-mutation answer back stamped as fresh. So the
+        generation moves on (the old fetch skips its cache write) and the
+        in-flight entry is forgotten (the next reader starts a new request).
+        """
+        for dt in data_types:
+            self._generations[(server, dt)] = self._generations.get((server, dt), 0) + 1
+        for k in list(self._inflight):
+            if k.server == server and k.data_type in data_types:
+                self._inflight.forget(k)
 
     # ------ Cache-write listeners (for WebSocketManager) ------
 
@@ -721,6 +788,8 @@ class ServerDataService:
             self._poll_task.cancel()
             logger.info("ServerDataService stopped")
         self._callback_tasks.cancel_all()
+        self._poll_fetch_tasks.cancel_all()
+        self._poll_fetches.clear()
 
     # ------ Poll loop ------
 
@@ -728,7 +797,10 @@ class ServerDataService:
         while self._running:
             try:
                 await asyncio.sleep(_POLL_TICK)
-                await self._poll_tick()
+                # Start, never await: the next tick must not wait on the
+                # slowest fetch of this one (a 60s client timeout on one hung
+                # server used to set the cadence for every key on every server).
+                self._start_due_fetches()
 
                 # Periodic cleanup
                 now = time.time()
@@ -761,64 +833,118 @@ class ServerDataService:
                 await asyncio.sleep(5)
 
     async def _poll_tick(self) -> None:
-        """Single tick: check each subscribed key and refresh if due.
+        """Single tick, awaited to completion: refresh every due key.
 
-        Collects all due keys first, then fetches them concurrently via gather.
+        The poll loop itself does not call this — it calls
+        :meth:`_start_due_fetches` and moves on. This is the same tick with the
+        started fetches awaited, for callers that need them settled.
+        """
+        tasks = self._start_due_fetches()
+        if tasks:
+            await asyncio.gather(*tasks)
+
+    def _start_due_fetches(self) -> List[asyncio.Task]:
+        """Start one tracked fetch task per due key and return without waiting.
+
+        A key whose previous fetch is still running is skipped, so a slow key
+        is fetched at its own pace instead of piling up duplicates.
         """
         now = time.time()
-        due_keys: List[CacheKey] = []
+        due: List[Tuple[float, CacheKey]] = []
 
         for key, subs in list(self._subscriptions.items()):
             if not subs:
+                continue
+
+            # Already being refreshed — by an earlier tick or by a reader.
+            running = self._poll_fetches.get(key)
+            if (running is not None and not running.done()) or key in self._inflight:
                 continue
 
             # Effective interval = min of all subscriber intervals
             effective_interval = min(s.interval for s in subs.values())
 
             entry = self._cache.get(key)
+            overdue = float("inf")  # never fetched: nothing is more overdue
             if entry:
                 age = now - entry.fetched_at
                 if age < effective_interval:
                     continue
+                if effective_interval > 0:
+                    overdue = age / effective_interval
 
                 # Exponential backoff on consecutive errors
-                if entry.consecutive_errors >= 3:
-                    backoff = min(60, 2**entry.consecutive_errors)
-                    if now - entry.last_error_at < backoff:
+                if entry.consecutive_errors >= _ERROR_BACKOFF_AFTER:
+                    if now - entry.last_error_at < _error_backoff(entry):
                         continue
 
-            due_keys.append(key)
+            due.append((overdue, key))
 
-        if not due_keys:
+        # Most overdue first, relative to each key's own cadence. Tokens used
+        # to go out in subscription order every tick, so once a server's budget
+        # was exceeded the most recently added keys never refreshed at all.
+        due.sort(key=lambda item: item[0], reverse=True)
+
+        tasks: List[asyncio.Task] = []
+        for _, key in due:
+            task = asyncio.create_task(self._rate_limited_fetch(key))
+            self._poll_fetches[key] = task
+            task.add_done_callback(lambda t, k=key: self._poll_fetch_done(k, t))
+            self._poll_fetch_tasks.track(task, f"{key.server}:{key.data_type.value}")
+            tasks.append(task)
+        return tasks
+
+    def _poll_fetch_done(self, key: CacheKey, task: asyncio.Task) -> None:
+        """Drop a settled poll fetch, unless a newer one already replaced it."""
+        if self._poll_fetches.get(key) is task:
+            del self._poll_fetches[key]
+
+    async def _rate_limited_fetch(self, key: CacheKey) -> None:
+        """Acquire the server's rate limit, then refresh one key."""
+        limiter = self._get_rate_limiter(key.server)
+        if not await limiter.acquire(timeout=0.5):
+            self._record_rate_limit_skip(key)
             return
+        try:
+            await self._fetch_and_cache(key)
+        except asyncio.CancelledError:
+            # ``except Exception`` never caught this: CancelledError is a
+            # BaseException. Ours — stop() cancelled this task — must
+            # propagate so the task really finishes cancelled. A cancellation
+            # that came out of the shared fetch is not ours: it is logged and
+            # the key is simply retried on a later tick.
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                raise
+            logger.warning(
+                "SDS: fetch for %s:%s was cancelled by something it awaited; "
+                "skipping it this tick",
+                key.server,
+                key.data_type.value,
+            )
+        except Exception:
+            pass  # Error already recorded in _fetch_and_cache
 
-        # Acquire rate limits and fetch concurrently
-        async def _rate_limited_fetch(key: CacheKey):
-            limiter = self._get_rate_limiter(key.server)
-            if not await limiter.acquire(timeout=0.5):
-                return
-            try:
-                await self._fetch_and_cache(key)
-            except asyncio.CancelledError:
-                # ``except Exception`` never caught this: CancelledError is a
-                # BaseException. Ours — the poll task was cancelled and gather
-                # cancelled this child with it — must propagate so stop() really
-                # stops. A cancellation that came out of the shared fetch is not
-                # ours, and must not travel up through gather into _poll_loop,
-                # where it is indistinguishable from a shutdown.
-                task = asyncio.current_task()
-                if task is not None and task.cancelling():
-                    raise
-                logger.warning(
-                    "SDS: fetch for %s:%s was cancelled by something it awaited; "
-                    "skipping it this tick",
-                    key.server,
-                    key.data_type.value,
-                )
-            except Exception:
-                pass  # Error already recorded in _fetch_and_cache
+    def _record_rate_limit_skip(self, key: CacheKey) -> None:
+        """Count a poll fetch dropped for lack of rate budget, and say so."""
+        server = key.server
+        total = self._rate_limit_skips.get(server, 0) + 1
+        self._rate_limit_skips[server] = total
 
-        await asyncio.gather(*[_rate_limited_fetch(k) for k in due_keys])
+        now = time.monotonic()
+        last_at, last_total = self._skips_logged.get(server, (0.0, 0))
+        if last_at and now - last_at < _SKIP_LOG_INTERVAL:
+            return
+        self._skips_logged[server] = (now, total)
+        logger.warning(
+            "SDS: rate limit on %s is skipping poll fetches (%d since the last "
+            "report, %d total; latest %s) — subscriptions exceed the server's "
+            "request budget",
+            server,
+            total - last_total,
+            total,
+            key.data_type.value,
+        )
 
     async def _fetch_and_cache(self, key: CacheKey) -> Optional[Any]:
         """Fetch data and update cache, coalescing concurrent fetches per key.
@@ -838,6 +964,8 @@ class ServerDataService:
 
         health = self.get_server_health(key.server)
         t0 = time.monotonic()
+        gen_key = (key.server, key.data_type)
+        generation = self._generations.get(gen_key, 0)
 
         try:
             client = await self._get_client(key.server)
@@ -847,6 +975,8 @@ class ServerDataService:
                 "SDS fetch failed %s:%s: %s", key.server, key.data_type.value, e
             )
             health.record_error()
+            if self._generations.get(gen_key, 0) != generation:
+                return None  # invalidated mid-flight; a newer fetch owns the entry
 
             # Record error on cache entry
             entry = self._cache.get(key)
@@ -867,6 +997,12 @@ class ServerDataService:
 
         latency_ms = (time.monotonic() - t0) * 1000
         health.record_success(latency_ms)
+
+        if self._generations.get(gen_key, 0) != generation:
+            # invalidate() ran while this request was out: the answer may
+            # predate the mutation that prompted it. Hand it to the callers
+            # that were already waiting, but never cache it.
+            return result
 
         old_entry = self._cache.get(key)
         old_value = old_entry.value if old_entry else None
@@ -938,6 +1074,7 @@ class ServerDataService:
             "active_subscriptions": sum(len(s) for s in self._subscriptions.values()),
             "subscribed_keys": len(self._subscriptions),
             "servers_tracked": len(self._health),
+            "rate_limit_skips": dict(self._rate_limit_skips),
             "health": {
                 name: {
                     "status": h.status.value,

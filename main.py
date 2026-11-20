@@ -50,6 +50,9 @@ logger = logging.getLogger(__name__)
 # which makes safe log sharing impossible. Suppressing to WARNING preserves
 # real HTTP errors while removing the token leak.
 logging.getLogger("httpx").setLevel(logging.WARNING)
+# APScheduler logs two INFO lines per job run. With routines on short intervals
+# that is most of the log, pushing everything worth reading out of it.
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
 
 def _get_start_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
@@ -276,8 +279,14 @@ async def start_callback_handler(
 # discovery in ``routines.base.discover_routines(force_reload=True)``, which
 # owns reimporting individual routine modules. Only the base module is listed,
 # so that machinery itself stays fresh.
+#
+# ``config_manager`` is deliberately absent too, for the reason no
+# ``condor.runtime.*`` module is reloaded: it owns live state. Re-executing it
+# resets ``ConfigManager._instance``, so the next ``get_config_manager()`` built
+# a second manager with an empty client pool while every stream task that had
+# captured the first went on using it — two diverging configs, and one open
+# aiohttp session per server that teardown never closed.
 _EXTRA_RELOAD_MODULES = (
-    "config_manager",
     "utils.auth",
     "utils.telegram_formatters",
     "routines.base",
@@ -848,8 +857,52 @@ async def startup(application: Application) -> None:
     except Exception:
         logger.exception("Reflection job registration failed (continuing without it)")
 
-    # Start file watcher
-    asyncio.create_task(watch_and_reload(application))
+    # Start file watcher. Through _spawn_background so the task has a strong
+    # reference (asyncio's own is weak) and a crash in it is logged.
+    if hot_reload_enabled():
+        _spawn_background(watch_and_reload(application), "Handler hot-reload watcher")
+    else:
+        logger.info("Handler hot-reload is off (%s)", HOT_RELOAD_ENV)
+
+
+# Ceiling for one teardown step, in seconds. A step that outlives it is
+# abandoned (cancelled, logged) so the steps after it — the state flushes most
+# of all — still run.
+TEARDOWN_STEP_TIMEOUT = 30.0
+# destroy_all stops sessions one at a time, each a subprocess tree to reap.
+TEARDOWN_SESSIONS_TIMEOUT = 60.0
+
+
+def _teardown_engines_timeout() -> float:
+    """Ceiling for stopping the trading engines.
+
+    A plain stop takes moments, but ``stop_all`` deliberately waits out an
+    engine that is already in an emergency wind-down rather than aborting it.
+    So this is the budget the timeout policy gives one whole wind-down, not the
+    short ceiling the other steps share: cutting it off early would be the
+    process walking away from positions it was in the middle of closing.
+    """
+    from condor.runtime.timeouts import TIMEOUTS
+
+    return TIMEOUTS.mcp_shutdown
+
+
+async def _teardown_step(name: str, step, timeout: float) -> None:
+    """Run one teardown step so that nothing it does can skip the next one.
+
+    ``step`` is a callable, sync or async. Its imports live inside it, so even
+    a module that fails to import costs only its own step.
+    """
+    try:
+        result = step()
+        if asyncio.iscoroutine(result):
+            await asyncio.wait_for(result, timeout)
+    except asyncio.TimeoutError:
+        logger.error(
+            "Teardown step %s still running after %.0fs; moving on", name, timeout
+        )
+    except Exception:
+        logger.exception("Teardown step %s failed", name)
 
 
 async def teardown(application: Application) -> None:
@@ -858,58 +911,110 @@ async def teardown(application: Application) -> None:
     The counterpart to :func:`startup`, and not PTB's ``post_shutdown`` for the
     same reason: ``Application.shutdown()`` does not call that hook either.
     Called explicitly from :func:`_run_dual`.
-    """
-    from condor.runtime import client as runtime
-    from condor.runtime import sessions as runtime_sessions
-    from condor.runtime.confirmations import get_registry
 
-    await runtime_sessions.stop_health_monitor()
-    await get_registry().stop()
-    await runtime.destroy_all()
+    Every step is isolated and bounded (:func:`_teardown_step`). It used to be
+    one straight run of awaits, so an exception out of an early step skipped
+    the engine stop, both flushes and every client close after it, and a step
+    that never returned held the process open until someone killed it.
+    """
+
+    async def _stop_health_monitor():
+        from condor.runtime import sessions as runtime_sessions
+
+        await runtime_sessions.stop_health_monitor()
+
+    async def _stop_confirmations():
+        from condor.runtime.confirmations import get_registry
+
+        await get_registry().stop()
+
+    async def _destroy_sessions():
+        from condor.runtime import client as runtime
+
+        await runtime.destroy_all()
 
     # Stop all trading agents. Graceful stop, deliberately NOT the shutdown
     # sequence — winding down positions is an emergency action, not what a
     # restart should do. Each engine records its final state on the way out.
-    from condor.runtime.conversations import flush_all as flush_conversations
-    from condor.runtime.loops import get_supervisor
-    from condor.runtime.state import flush_all
+    async def _stop_engines():
+        from condor.runtime.loops import get_supervisor
 
-    await get_supervisor().stop_all()
+        await get_supervisor().stop_all()
+
     # Writes are debounced, so force the last one out on a clean shutdown.
-    flush_all()
+    def _flush_state():
+        from condor.runtime.state import flush_all
+
+        flush_all()
+
     # A prompt still streaming when the bot went down holds its turn in
     # memory; write it out rather than losing the last thing that was said.
-    flush_conversations()
+    def _flush_conversations():
+        from condor.runtime.conversations import flush_all as flush_conversations
 
-    # Stop WebSocket manager
-    from condor.web.ws_manager import get_ws_manager
+        flush_conversations()
 
-    get_ws_manager().stop()
+    def _stop_ws_manager():
+        from condor.web.ws_manager import get_ws_manager
 
-    # Stop ServerDataService
-    from condor.server_data_service import get_server_data_service
+        get_ws_manager().stop()
 
-    get_server_data_service().stop()
+    def _stop_server_data_service():
+        from condor.server_data_service import get_server_data_service
+
+        get_server_data_service().stop()
 
     # Close cached Hummingbot API clients (ConfigManager)
-    from config_manager import get_config_manager
+    async def _close_api_clients():
+        from config_manager import get_config_manager
 
-    await get_config_manager().close_all_clients()
+        await get_config_manager().close_all_clients()
 
     # Close MCP hummingbot client
-    from mcp_servers.hummingbot_api.hummingbot_client import hummingbot_client
+    async def _close_mcp_client():
+        from mcp_servers.hummingbot_api.hummingbot_client import hummingbot_client
 
-    await hummingbot_client.close()
+        await hummingbot_client.close()
 
     # Record the clean exit and give the outbox one last chance. Both are no-ops
     # unless the admin opted in, and neither can fail the shutdown.
-    try:
+    async def _flush_telemetry():
         from condor import telemetry
 
         telemetry.shutdown("signal")
         await telemetry.flush("teardown")
-    except Exception:
-        logger.debug("Telemetry teardown failed", exc_info=True)
+
+    steps = (
+        ("health monitor", _stop_health_monitor, TEARDOWN_STEP_TIMEOUT),
+        ("confirmations", _stop_confirmations, TEARDOWN_STEP_TIMEOUT),
+        ("agent sessions", _destroy_sessions, TEARDOWN_SESSIONS_TIMEOUT),
+        ("trading engines", _stop_engines, _teardown_engines_timeout()),
+        ("state flush", _flush_state, TEARDOWN_STEP_TIMEOUT),
+        ("conversation flush", _flush_conversations, TEARDOWN_STEP_TIMEOUT),
+        ("websocket manager", _stop_ws_manager, TEARDOWN_STEP_TIMEOUT),
+        ("server data service", _stop_server_data_service, TEARDOWN_STEP_TIMEOUT),
+        ("API clients", _close_api_clients, TEARDOWN_STEP_TIMEOUT),
+        ("MCP client", _close_mcp_client, TEARDOWN_STEP_TIMEOUT),
+        ("telemetry", _flush_telemetry, TEARDOWN_STEP_TIMEOUT),
+    )
+    for name, step, timeout in steps:
+        await _teardown_step(name, step, timeout)
+
+
+HOT_RELOAD_ENV = "CONDOR_HOT_RELOAD"
+
+
+def hot_reload_enabled() -> bool:
+    """Whether the handler file watcher runs. On unless switched off.
+
+    ``CONDOR_HOT_RELOAD=0`` (or ``false``/``off``/``no``) is for an install
+    where nobody edits code in place: there a change under ``handlers/`` or
+    ``routines/`` is a ``git pull``, and reloading half of it into the running
+    process is not what anyone asked for. On by default because routines and
+    handlers edited on a live bot are expected to take effect without a restart.
+    """
+    raw = os.environ.get(HOT_RELOAD_ENV, "").strip().lower()
+    return raw not in ("0", "false", "off", "no")
 
 
 async def watch_and_reload(application: Application) -> None:
@@ -1010,8 +1115,96 @@ async def send_to_all(self, message: str, parse_mode: str = "Markdown"):
             logger.warning(f"Failed to send message to chat {chat_id}: {e}")
 
 
+_INSTANCE_LOCK_FILENAME = "condor.lock"
+# Held for the life of the process and never read again: the lock is the open
+# descriptor, so the handle has to outlive main(). Python opens descriptors
+# close-on-exec, which is what lets a /update re-exec take it afresh.
+_instance_lock_handle = None
+
+
+def _acquire_instance_lock() -> bool:
+    """Take the one-Condor-per-runtime-root lock. False when another holds it.
+
+    Everything main() does next assumes it is alone: the ACP reaper kills every
+    process carrying this bot's marker, boot reconciliation rewrites any status
+    file under a foreign boot id as crashed, and polling competes for updates.
+    A second ``python main.py`` therefore tore down the live instance's agents
+    before failing on the port bind. The tmux check behind ``make run`` cannot
+    see a Condor started any other way; this can.
+
+    Same shape as the update run lock (``condor.updates.run``): advisory, and
+    refusing only when someone actually holds it. A filesystem with no flock
+    boots as before rather than being locked out by the safety net.
+    """
+    global _instance_lock_handle
+    if _instance_lock_handle is not None:
+        return True
+    path = paths.runtime_root() / _INSTANCE_LOCK_FILENAME
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - no flock on this platform
+        return True
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # "a+" so losing the race does not wipe the holder's pid at open.
+        handle = path.open("a+")
+    except OSError:
+        logger.warning("Could not open %s; starting without the instance lock", path)
+        return True
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        try:
+            handle.seek(0)
+            holder = handle.read().strip()
+        except OSError:
+            holder = ""
+        handle.close()
+        logger.error(
+            "Condor is already running against %s%s. Stop it first (make stop) "
+            "— a second instance would kill its agent sessions.",
+            path.parent,
+            f" (pid {holder})" if holder else "",
+        )
+        return False
+    except OSError:
+        handle.close()
+        logger.warning("Could not lock %s; starting without the instance lock", path)
+        return True
+    try:
+        handle.seek(0)
+        handle.truncate()
+        handle.write(f"{os.getpid()}\n")
+        handle.flush()
+    except OSError:
+        pass
+    _instance_lock_handle = handle
+    return True
+
+
 def main() -> None:
     """Run the bot."""
+    # First, before anything that assumes this is the only Condor here — the
+    # reaper below most of all.
+    if not _acquire_instance_lock():
+        raise SystemExit(1)
+
+    # A log that outlives the tmux pane (rotating file under the runtime root),
+    # faulthandler for hard crashes, and redaction on every handler. After the
+    # lock, so two processes never rotate one file under each other.
+    from condor.logging_setup import setup_file_logging
+
+    log_file = setup_file_logging()
+    if log_file is not None:
+        logger.info("Logging to %s", log_file)
+
+    # Handlers and routines build Plotly figures directly, in this process.
+    # Applied here rather than on ``import condor`` so that the processes that
+    # never draw a chart (every MCP server, the doctor) stop paying for it.
+    from condor.plotly_compat import ensure_plotly_templates_patched
+
+    ensure_plotly_templates_patched()
+
     # Refuse to start on a configuration that cannot mean what it says: telegram
     # mode (the default) with no token used to surface as an InvalidToken
     # traceback from inside PTB, and must never be quietly read as "local mode".
@@ -1082,6 +1275,11 @@ def main() -> None:
             exec_restart()  # never returns
 
 
+# How long uvicorn waits for in-flight requests on shutdown before cancelling
+# them. Seconds.
+WEB_GRACEFUL_SHUTDOWN_SEC = 10
+
+
 def _web_server_config(web_app):
     """uvicorn's config for the dashboard, isolated so the bind address is testable.
 
@@ -1099,7 +1297,29 @@ def _web_server_config(web_app):
         port=WEB_PORT,
         log_level="info",
         access_log=False,
+        # uvicorn's default is to wait for in-flight requests without limit,
+        # and it is drained *before* teardown() destroys the sessions — but a
+        # streaming agent turn only ends when its session does. Unbounded, a
+        # SIGTERM or /update restart hung for as long as the longest turn.
+        timeout_graceful_shutdown=WEB_GRACEFUL_SHUTDOWN_SEC,
     )
+
+
+async def _drain_web_task(web_task: "asyncio.Future") -> None:
+    """Wait for uvicorn to finish, whatever it finished with.
+
+    ``BaseException`` on purpose: uvicorn reports a failed bind with
+    ``sys.exit(1)``, and a ``SystemExit`` out of this await used to skip every
+    shutdown step after it — leaving the engines and ACP children that
+    ``startup()`` had just started with nothing to stop them. The exit itself is
+    not lost: the loop re-raises it from ``asyncio.run`` once the steps are done.
+    """
+    try:
+        await web_task
+    except Exception:
+        logger.exception("Web server crashed during shutdown")
+    except BaseException as exc:
+        logger.error("Web server exited (%r); running the shutdown steps", exc)
 
 
 async def _run_dual(application: Application) -> None:
@@ -1308,10 +1528,7 @@ async def _run_dual(application: Application) -> None:
         logger.info("Shutting down...")
         stop_task.cancel()
         server.should_exit = True
-        try:
-            await web_task
-        except Exception:
-            logger.exception("Web server crashed during shutdown")
+        await _drain_web_task(web_task)
         # Run each step independently so one failure can't skip the rest.
         # teardown() runs last, mirroring where post_shutdown would have sat.
         # Local mode never initialized or started the Application, so the PTB

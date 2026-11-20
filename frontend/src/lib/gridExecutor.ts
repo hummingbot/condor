@@ -222,6 +222,75 @@ export const LOOKBACK_OPTIONS: { label: string; seconds: number }[] = [
   { label: "30d", seconds: 30 * 86400 },
 ];
 
+// ── Interval × range ──
+//
+// The two pickers above are independent, and the candle store is not
+// unbounded: 1m × 30d is 43,200 candles, of which the chart could only ever
+// keep a fraction — it drew the last day and a half under a "30d" button.
+// So a range implies a *finest* interval, and the pages step up to it.
+
+const INTERVAL_SECONDS: Record<string, number> = {
+  "1s": 1,
+  "1m": 60,
+  "3m": 180,
+  "5m": 300,
+  "15m": 900,
+  "30m": 1800,
+  "1h": 3600,
+  "2h": 7200,
+  "4h": 14400,
+  "1d": 86400,
+  "1w": 604800,
+};
+
+/** Seconds in one candle of `interval`; an unknown one is read as a minute. */
+export function intervalSeconds(interval: string): number {
+  return INTERVAL_SECONDS[interval] ?? 60;
+}
+
+/**
+ * The most candles one chart asks for and keeps: a week of minutes.
+ *
+ * `lib/candle-store` sizes a channel up to this (its own hard ceiling sits
+ * just above), and a range that would need more is drawn at a coarser
+ * interval instead of being silently cut short.
+ */
+export const MAX_CHART_CANDLES = 7 * 24 * 60;
+
+/**
+ * The finest of `intervals` (ordered fine → coarse) whose candles over
+ * `lookbackSeconds` fit the chart's budget. The coarsest is the answer when
+ * none does — the chart then clamps how far back it reaches.
+ */
+export function intervalFloor(
+  lookbackSeconds: number,
+  intervals: readonly string[] = INTERVALS,
+): string {
+  for (const iv of intervals) {
+    if (lookbackSeconds / intervalSeconds(iv) <= MAX_CHART_CANDLES) return iv;
+  }
+  return intervals[intervals.length - 1];
+}
+
+/**
+ * The interval a chart should actually draw: the picked one, unless the range
+ * needs a coarser one. The pick itself is left alone, so shortening the range
+ * gives the reader back the interval they chose.
+ */
+export function resolveChartInterval(
+  picked: string,
+  lookbackSeconds: number,
+  intervals: readonly string[] = INTERVALS,
+): string {
+  const floor = intervalFloor(lookbackSeconds, intervals);
+  return intervals.indexOf(picked) >= intervals.indexOf(floor) ? picked : floor;
+}
+
+/** How far back a chart at `interval` can reach inside the candle budget. */
+export function keptLookbackSeconds(lookbackSeconds: number, interval: string): number {
+  return Math.min(lookbackSeconds, MAX_CHART_CANDLES * intervalSeconds(interval));
+}
+
 // ── Price rules ──
 //
 // One copy of the grid's ordering rules, read by the panel's error list, by the

@@ -3,6 +3,7 @@ Configuration settings for Hummingbot MCP Server
 """
 
 import os
+import tempfile
 from pathlib import Path
 
 import aiohttp
@@ -19,6 +20,19 @@ SERVER_CONFIG_PATH = CONFIG_DIR / "server.yml"
 #: standalone (the uvx console script, an external MCP host, the checked-in
 #: `.mcp.json`), and a launch with no flag has to keep serving the whole surface.
 DEFAULT_TOOL_PROFILE = "full"
+
+
+def credentials_were_injected() -> bool:
+    """True when this process was spawned holding somebody else's credentials.
+
+    The same env signal ``server._apply_cli_args`` reads: whatever it lifted
+    onto ``settings`` is a secret this process was *handed* by its spawner
+    (``build_mcp_servers_for_session``), not one supplied by whoever is talking
+    to it over stdio. A standalone launch sets neither variable.
+    """
+    return bool(
+        os.getenv("HUMMINGBOT_API_USERNAME") or os.getenv("HUMMINGBOT_API_PASSWORD")
+    )
 
 
 class ServerConfig(BaseModel):
@@ -55,10 +69,30 @@ def _load_server_config() -> ServerConfig:
 
 
 def save_server_config(config: ServerConfig):
-    """Persist the active server config to disk."""
-    CONFIG_DIR.mkdir(exist_ok=True)
-    with open(SERVER_CONFIG_PATH, "w") as f:
-        yaml.dump(config.model_dump(), f, default_flow_style=False, sort_keys=False)
+    """Persist the active server config to disk, owner-readable only.
+
+    The file holds the API password in clear. It is written to a 0600 temp file
+    and renamed into place, so it is never world-readable (it used to be created
+    0644) and a crash mid-write cannot leave half a config behind.
+    """
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=CONFIG_DIR, prefix=f".{SERVER_CONFIG_PATH.name}.", suffix=".tmp"
+    )
+    try:
+        # mkstemp already creates the file 0600; stated again because the mode
+        # is the point, and so it survives a permissive umask or a platform
+        # default.
+        os.chmod(tmp_name, 0o600)
+        with os.fdopen(fd, "w") as f:
+            yaml.dump(config.model_dump(), f, default_flow_style=False, sort_keys=False)
+        os.replace(tmp_name, SERVER_CONFIG_PATH)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 class Settings(BaseModel):

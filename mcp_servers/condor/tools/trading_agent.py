@@ -1,11 +1,16 @@
 """Agent CRUD, loop CRUD, instance lifecycle, and the journal."""
 
+import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 
 from condor.fsutil import atomic_write_text
-from mcp_servers.condor.condor_client import agent_strategy_from_agent_id, call_main_api
-from mcp_servers.condor.exceptions import APIError
+from mcp_servers.condor.condor_client import (
+    agent_strategy_from_agent_id,
+    call_main_api,
+    path_segment,
+)
+from mcp_servers.condor.exceptions import APIError, APITimeout
 from mcp_servers.condor.settings import settings
 
 # ---------------------------------------------------------------------------
@@ -28,7 +33,7 @@ def _manage_strategy(
     skills: list[str] | None,
     config: dict | None,
 ) -> dict:
-    from condor.agents.strategy import StrategyStore, split_key
+    from condor.agents.strategy import StrategyStore
 
     store = StrategyStore()
 
@@ -109,17 +114,7 @@ def _manage_strategy(
         s = store.get_by_key(loop_id)
         if not s:
             return {"error": f"Loop '{loop_id}' not found"}
-        if name:
-            s.name = name
-        if description:
-            s.description = description
-        if instructions:
-            s.instructions = instructions
-        if agent_key:
-            s.agent_key = agent_key
-        if skills is not None:
-            s.skills = skills
-        store.update(s)
+        effective = None
         if config:
             # Merged into the *effective* config (`config.yml`, which always
             # overrides `loop.md`'s `default_config` once saved — see
@@ -128,6 +123,11 @@ def _manage_strategy(
             # `default_config` here was a silent no-op for any loop whose
             # config was ever saved from the dashboard: `config.yml` kept
             # overriding it and the chat-approved change never took effect.
+            #
+            # Validated ahead of every write, so a refused config leaves the
+            # loop whole rather than saving the name, instructions and skills
+            # that happened to be listed beside it and then answering "error"
+            # (MC-15) — the same order ``update_agent`` keeps for its pin.
             from pydantic import ValidationError
 
             from condor.agents.config import (
@@ -142,19 +142,89 @@ def _manage_strategy(
                 AgentConfig.from_dict(effective)
             except ValidationError as exc:
                 return {"error": f"Invalid config: {exc}"}
+        if name:
+            s.name = name
+        # ``is not None``, as ``update_agent`` has it: "" clears a description.
+        if description is not None:
+            s.description = description
+        if instructions:
+            s.instructions = instructions
+        if agent_key:
+            s.agent_key = agent_key
+        if skills is not None:
+            s.skills = skills
+        store.update(s)
+        if effective is not None:
             save_full_config(s.home, effective)
         return {"updated": True, "loop_id": s.key, "name": s.name}
 
     elif action == "delete_strategy":
-        if not loop_id:
-            return {"error": "loop_id is required"}
-        parts = split_key(loop_id)
-        if not parts:
-            return {"error": f"Invalid loop_id '{loop_id}'"}
-        deleted = store.delete(parts[0], parts[1])
-        return {"deleted": deleted}
+        return {"error": _DELETE_IS_REMOTE}
 
     return {"error": f"Unknown loop action: {action}"}
+
+
+# A delete is the one CRUD action this subprocess must not carry out itself
+# (MC-02). Whether a loop is running is known only to the main process -- the
+# engine registry lives there -- and ``StrategyStore.delete`` removes the whole
+# home directory without asking: sessions, journal, learnings, config and state,
+# out from under an engine that keeps trading. The dashboard's route refuses
+# that; the tool wrote the store directly and so had no such refusal.
+_DELETE_IS_REMOTE = (
+    "delete is carried out by the main process, which knows what is running — "
+    "reach it through the tool (manage_loops_tool / manage_agents_tool)"
+)
+
+
+async def _delete_strategy(loop_id: str | None) -> dict:
+    """Delete a loop through the route that refuses a running one."""
+    from condor.agents.strategy import split_key
+
+    if not loop_id:
+        return {"error": "loop_id is required"}
+    parts = split_key(loop_id)
+    if not parts:
+        return {"error": f"Invalid loop_id '{loop_id}'"}
+    # Each half must be one path segment before it is put in a URL: the HTTP
+    # client collapses ``..``, so an unchecked id addresses any DELETE route.
+    try:
+        agent, strategy = path_segment(parts[0]), path_segment(parts[1])
+    except APIError:
+        return {"error": f"Invalid loop_id '{loop_id}'"}
+    try:
+        return await call_main_api("DELETE", f"/agents/{agent}/strategies/{strategy}")
+    except APIError as exc:
+        return {"error": str(exc)}
+
+
+async def _delete_agent(agent_slug: str | None) -> dict:
+    """Delete an agent through the route that refuses one with a running loop."""
+    if not agent_slug:
+        return {"error": "agent_slug is required"}
+    from condor.agents.strategy import StrategyStore
+
+    # Before anything else, and before the URL below is built: ``StrategyStore
+    # .list`` answers ``[]`` for an unsafe id, so the loop check alone lets
+    # ``../settings/servers/x`` through to a DELETE on another route.
+    try:
+        segment = path_segment(agent_slug)
+    except APIError:
+        return {"error": f"Invalid agent id '{agent_slug}'"}
+
+    # A read, so it stays local: the route would remove the loops with the
+    # agent, and this tool has always made the caller delete them first.
+    owned = StrategyStore().list(agent_slug)
+    if owned:
+        return {
+            "error": (
+                f"Agent '{agent_slug}' still owns {len(owned)} loop(s). "
+                "Delete its loops first."
+            )
+        }
+    try:
+        return await call_main_api("DELETE", f"/agents/{segment}")
+    except APIError as exc:
+        return {"error": str(exc)}
 
 
 # ---------------------------------------------------------------------------
@@ -774,19 +844,7 @@ def _manage_agent(
         )
 
     if action == "delete_agent":
-        if not agent_slug:
-            return {"error": "agent_slug is required"}
-        from condor.agents.strategy import StrategyStore
-
-        owned = StrategyStore().list(agent_slug)
-        if owned:
-            return {
-                "error": (
-                    f"Agent '{agent_slug}' still owns {len(owned)} loop(s). "
-                    "Delete its loops first."
-                )
-            }
-        return {"deleted": store.delete(agent_slug)}
+        return {"error": _DELETE_IS_REMOTE}
 
     return {"error": f"Unknown agent action: {action}"}
 
@@ -794,6 +852,56 @@ def _manage_agent(
 # ---------------------------------------------------------------------------
 # Agent lifecycle (delegates to main process via web API)
 # ---------------------------------------------------------------------------
+
+
+async def _start_timed_out(strategy, reason: str) -> dict:
+    """What to tell the caller when the start call outlived its budget.
+
+    Giving up on the call does not cancel the route, so the loop may be up. A
+    bare failure here is read as "not started" and retried, and the start route
+    has no already-running guard: the retry is a second live session of the
+    same loop (MC-01). So look before answering.
+    """
+    loop_id = f"{strategy.agent_slug}.{strategy.slug}"
+    check = 'control_agent(action="list")'
+    try:
+        summaries = await call_main_api("GET", "/agents")
+    except APIError:
+        return {
+            "error": (
+                f"{reason} Whether loop '{loop_id}' started could not be "
+                f"confirmed — do NOT start it again until {check} shows no "
+                "running instance of it."
+            )
+        }
+
+    running = [
+        inst.get("agent_id")
+        for summary in (summaries if isinstance(summaries, list) else [])
+        if summary.get("slug") == strategy.agent_slug
+        for strat in summary.get("strategies", [])
+        if strat.get("slug") == strategy.slug
+        for inst in strat.get("instances", [])
+        if inst.get("status") in ("running", "paused")
+    ]
+    if running:
+        return {
+            "timed_out": True,
+            "loop_id": loop_id,
+            "running_instances": running,
+            "note": (
+                "The start call did not answer in time, but this loop has a "
+                "running instance — treat it as started and do NOT start it "
+                "again. Its first tick may still be in flight."
+            ),
+        }
+    return {
+        "error": (
+            f"{reason} No running instance of loop '{loop_id}' is listed yet; "
+            f"it may still be coming up. Check {check} before retrying — a "
+            "second start would run a second session of the same loop."
+        )
+    }
 
 
 async def _agent_lifecycle(
@@ -857,15 +965,24 @@ async def _agent_lifecycle(
 
             trading_context = config_dict.pop("trading_context", "")
 
-            return await call_main_api(
-                "POST",
-                f"/agents/{strategy.agent_slug}/strategies/{strategy.slug}/start",
-                {
-                    "config": config_dict,
-                    "trading_context": trading_context,
-                    "chat_id": settings.chat_id,
-                },
-            )
+            # The route answers after the preflight and the first tick's
+            # bounded wait, so it is given the budget that covers those rather
+            # than the 15 seconds of a plain question (MC-01).
+            from condor.runtime.timeouts import TIMEOUTS
+
+            try:
+                return await call_main_api(
+                    "POST",
+                    f"/agents/{strategy.agent_slug}/strategies/{strategy.slug}/start",
+                    {
+                        "config": config_dict,
+                        "trading_context": trading_context,
+                        "chat_id": settings.chat_id,
+                    },
+                    timeout=TIMEOUTS.mcp_start,
+                )
+            except APITimeout as exc:
+                return await _start_timed_out(strategy, str(exc))
 
         if action in ("stop_agent", "pause_agent", "resume_agent", "shutdown_agent"):
             if not agent_id:
@@ -949,9 +1066,33 @@ def _resolve_experiment_file(agent_id: str):
     return find_experiment_file(base_dir, num), num
 
 
+# What the two journal tools accept, in one place: the registered signatures
+# carry the same members as ``Literal``s, and the impls reject anything else
+# explicitly rather than falling through to a default (MC-13).
+JOURNAL_READ_SECTIONS = (
+    "recent",
+    "learnings",
+    "summary",
+    "state",
+    "full",
+    "runs",
+    "tracker",
+)
+JOURNAL_ENTRY_TYPES = ("action", "learning", "state", "canvas")
+
+
 def journal_read(agent_id: str, section: str = "recent", max_entries: int = 30) -> dict:
     if not agent_id:
         return {"error": "agent_id is required"}
+    section = section or "recent"
+    if section not in JOURNAL_READ_SECTIONS and not section.startswith("run:"):
+        # A typo used to answer with "recent", which reads as a real reply to
+        # the question that was not asked.
+        return {
+            "error": f"Unknown section '{section}'. Use one of: "
+            + ", ".join(JOURNAL_READ_SECTIONS)
+            + ', or "run:N" for one run snapshot.'
+        }
 
     # Experiments (dry_run / run_once) have no journal — surface the saved
     # dry-run snapshot instead of the misleading "no journal available" error.
@@ -1022,13 +1163,22 @@ def journal_write(
     reasoning: str = "",
     risk_note: str = "",
     tick: int = 0,
-    category: str = "",
-    section: str = "",
+    category: str | None = "",
+    section: str | None = "",
 ) -> dict:
     if not agent_id:
         return {"error": "agent_id is required"}
     if not text:
         return {"error": "text is required"}
+    if entry_type not in JOURNAL_ENTRY_TYPES:
+        # Anything unrecognised used to fall through to the action branch and
+        # be written under the default tick 0 — the "**#0**" entry the guard
+        # below exists to prevent, reached by a typo instead of a dropped
+        # argument (MC-13).
+        return {
+            "error": f"Unknown entry_type '{entry_type}'. Use one of: "
+            + ", ".join(JOURNAL_ENTRY_TYPES)
+        }
     # An action and a canvas revision are both *dated* by their tick, and the
     # default of 0 is not a date. Written through, it reached the journal as
     # "**#0**" -- which the Decisions panel renders as ERR, so a perfectly good
@@ -1079,7 +1229,7 @@ def journal_write(
         # inherits the engine resolution and the experiment-mode skip above.
         from condor.agents import canvas
 
-        return canvas.write_section(session_dir, section, text, tick=tick)
+        return canvas.write_section(session_dir, section or "", text, tick=tick)
 
     jm = JournalManager(agent_id, session_dir=session_dir, agent_dir=agent_dir)
 
@@ -1087,7 +1237,7 @@ def journal_write(
         jm.append_learning(text, category=category or "market")
     elif entry_type == "state":
         jm.write_state(text)
-    else:
+    else:  # "action" — the only member left; unknown types were refused above
         jm.append_action(tick, text, reasoning, risk_note)
     return {"written": True}
 
@@ -1227,6 +1377,9 @@ _AGENT_ACTIONS = {
     "publish_hub": "publish_hub",
 }
 
+# The agent actions that do network I/O against the hub, synchronously.
+_HUB_NETWORK_ACTIONS = ("hub_browse", "hub_get", "publish_hub")
+
 _STRATEGY_ACTIONS = {
     "list": "list_strategies",
     "get": "get_strategy",
@@ -1334,6 +1487,36 @@ def manage_loops(
         skills,
         config,
     )
+
+
+async def manage_agents_tool(action: str, **kwargs) -> dict:
+    """``manage_agents`` as the tool calls it: local, except what must not be.
+
+    Everything is the synchronous :func:`manage_agents` above, which reads and
+    writes the stores this subprocess shares with the main process. ``delete``
+    is the exception and crosses to the main process (MC-02).
+    """
+    resolved, err = _resolve_action("manage_agents", action, _AGENT_ACTIONS)
+    if err:
+        return err
+    if resolved == "delete_agent":
+        return await _delete_agent(kwargs.get("agent_slug"))
+    if resolved in _HUB_NETWORK_ACTIONS:
+        # These talk to the Botcamp hub with a blocking HTTP client. Run on
+        # this subprocess's event loop they stalled every other tool call the
+        # session had in flight for as long as the hub took to answer (MC-15).
+        return await asyncio.to_thread(manage_agents, action, **kwargs)
+    return manage_agents(action, **kwargs)
+
+
+async def manage_loops_tool(action: str, **kwargs) -> dict:
+    """``manage_loops`` as the tool calls it; ``delete`` crosses (MC-02)."""
+    resolved, err = _resolve_action("manage_loops", action, _STRATEGY_ACTIONS)
+    if err:
+        return err
+    if resolved == "delete_strategy":
+        return await _delete_strategy(kwargs.get("loop_id"))
+    return manage_loops(action, **kwargs)
 
 
 async def control_agent(

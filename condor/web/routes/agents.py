@@ -66,6 +66,7 @@ from condor.agents.sessions_index import (
     list_sessions,
 )
 from condor.agents.strategy import LOOP_MD, LOOPS_DIRNAME
+from condor.asyncutil import SingleFlight
 from condor.fsutil import atomic_write_text
 from condor.layering import fork_if_stock, write_preserving_stamp
 from condor.web.auth import (
@@ -80,8 +81,19 @@ if TYPE_CHECKING:
     from condor.agents.performance import AgentPerformance
 
 # ── Simple in-memory TTL cache for performance data ──
+# ``key -> (expires_at, value)``. The expiry is stored rather than the write
+# time so one entry can be kept for less than the others (WR-03).
 _PERF_CACHE: dict[str, tuple[float, Any]] = {}
 _PERF_TTL = 30.0  # seconds
+# How long a render that could not be fully priced is kept. Not a result worth
+# 30s, but worth this: without it every poll during an outage re-walks every
+# session id with no backoff at all. Short enough that the first poll a few
+# seconds after the server recovers prices again (CORR-709).
+_PERF_FAILED_TTL = 5.0
+# One in-flight rollup per cache key. The TTL above only helps once an answer
+# has arrived; at each expiry the roster, agent and strategy polls of one tab
+# all miss together and would otherwise each run the whole walk (WR-03).
+_PERF_INFLIGHT = SingleFlight()
 
 # Long-lived cache for CLOSED sessions/experiments, keyed by agent_id.
 # A closed session's executors are immutable (no engine running, no open
@@ -117,15 +129,15 @@ def _cache_get(key: str) -> Any | None:
     entry = _PERF_CACHE.get(key)
     if not entry:
         return None
-    ts, val = entry
-    if time.time() - ts > _PERF_TTL:
+    expires_at, val = entry
+    if time.time() > expires_at:
         _PERF_CACHE.pop(key, None)
         return None
     return val
 
 
-def _cache_set(key: str, val: Any) -> None:
-    _PERF_CACHE[key] = (time.time(), val)
+def _cache_set(key: str, val: Any, ttl: float | None = None) -> None:
+    _PERF_CACHE[key] = (time.time() + (_PERF_TTL if ttl is None else ttl), val)
 
 
 log = logging.getLogger(__name__)
@@ -1440,14 +1452,18 @@ async def _compute_strategy_performance(
     rendered the page first (SEC-334). ``_CLOSED_PERF_CACHE`` needs no such
     split: it is only ever read on the branch that already has a client.
 
-    A render in which any executor fetch failed is returned but not cached, so
-    the next poll re-fetches instead of serving the failed ids' $0 rows for 30s.
-    An ``unreachable`` render is returned but not cached either (CORR-709):
-    ``get_client`` already rate-limits reconnects, so a 30s entry here would only
-    stack on its fail-fast window. ``no_server``/``no_access`` stay cached.
-    """
-    from condor.agents.performance import fetch_agent_performance_batch
+    A render in which any executor fetch failed is kept only for
+    ``_PERF_FAILED_TTL``, so the failed ids' $0 rows are never served for 30s.
+    An ``unreachable`` render gets the same short entry (CORR-709): an outage is
+    transient, and the first poll after the server recovers must price again.
+    ``no_server``/``no_access`` stay cached for the full TTL.
 
+    Concurrent callers that miss the cache share one walk (WR-03): the work
+    runs as a single-flight task per cache key and writes the cache itself, so
+    a caller cancelled by navigation neither abandons the fetch nor leaves the
+    cache empty for the next one. Sharing by cache key is sharing by the same
+    priced/unpriced bucket the cache already shares by.
+    """
     priced = _may_use_strategy_server(
         _strategy_server(strategy_dir, default_config), principal
     )
@@ -1455,6 +1471,28 @@ async def _compute_strategy_performance(
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
+
+    return await _PERF_INFLIGHT.run(
+        cache_key,
+        lambda: _render_strategy_performance(
+            run_key, strategy_dir, default_config, principal, cache_key
+        ),
+    )
+
+
+async def _render_strategy_performance(
+    run_key: str,
+    strategy_dir: Path,
+    default_config: dict | None,
+    principal: int,
+    cache_key: str,
+):
+    """The uncached walk behind :func:`_compute_strategy_performance`.
+
+    Writes ``cache_key`` itself, so the entry lands even when every caller that
+    was waiting on this render has gone away.
+    """
+    from condor.agents.performance import fetch_agent_performance_batch
 
     ids = enumerate_agent_ids(run_key, strategy_dir)
     client, _server, unavailable = await _get_client_for_strategy(
@@ -1617,10 +1655,13 @@ async def _compute_strategy_performance(
         unavailable = "unreachable"
 
     result = (sessions, totals, unavailable)
-    # An outage is transient, not a config/permission state: skip the cache so
-    # the first poll after the server recovers prices again (CORR-709).
+    # An outage is transient, not a config/permission state: keep it only long
+    # enough to stop every poll re-walking a dead server, so the first poll a
+    # few seconds after it recovers prices again (CORR-709, WR-03).
     if not fetch_failed and unavailable != "unreachable":
         _cache_set(cache_key, result)
+    else:
+        _cache_set(cache_key, result, _PERF_FAILED_TTL)
     return result
 
 
@@ -2763,6 +2804,7 @@ async def discard_agent_skill_proposal(
 ):
     """Throw the offered playbook away. The library is untouched either way."""
     agent = _get_agent(slug)
+    _require_no_foreign_live_run_for_agent(agent.slug, user)
     if not _proposals().discard(agent.slug):
         raise HTTPException(status_code=404, detail="No proposal is pending")
     return {"discarded": True}
@@ -2911,6 +2953,8 @@ async def update_agent_config(
     from config_manager import get_config_manager
 
     agent = _get_agent(slug)
+    # The same front matter ``update_agent_md`` gates (SEC-638, WR-11).
+    _require_no_foreign_live_run_for_agent(agent.slug, user)
 
     # A pin decides which account the Agent's tools trade on, so it is gated
     # like every other server-scoped write. An empty string clears the pin and
@@ -3961,8 +4005,10 @@ async def get_session_executors(
     # Same rule as the rollup: a held client to a backend that has gone down
     # still answers, with zeros — say it was unreachable, not "traded nothing".
     failed_ids: set[str] = set()
+    # ``pnl_series=True``: the curve below is cut from the histories these
+    # figures are already sliced from, so the poll walks them once (WR-04).
     perf = await fetch_agent_performance(
-        client, agent_id, windows=windows, failed_ids=failed_ids
+        client, agent_id, windows=windows, pnl_series=True, failed_ids=failed_ids
     )
     # close_type_counts is base-lifetime, not window-sliced: the payload counts
     # closes per controller with no timestamp to slice on. Equal to the session's
@@ -3977,14 +4023,19 @@ async def get_session_executors(
     # believed at the time, so a session that ran while it was blind to its bots
     # has a permanently flat record; this is derived and therefore self-correcting.
     # A session that let go of every base stops the curve where it last held one.
-    since, until = window_span(windows)
-    try:
-        pnl_series = await fetch_agent_pnl_series(
-            client, list(windows), since, until=until
-        )
-    except Exception as e:
-        log.warning("pnl series for %s failed: %s", agent_id, e)
-        pnl_series = []
+    # ``perf.pnl_series`` is ``None`` whenever that one walk is not exactly what
+    # the standalone fetch would make (a released session, a base with no known
+    # takeover); only then is the second fetch paid for.
+    pnl_series = perf.pnl_series
+    if pnl_series is None:
+        since, until = window_span(windows)
+        try:
+            pnl_series = await fetch_agent_pnl_series(
+                client, list(windows), since, until=until
+            )
+        except Exception as e:
+            log.warning("pnl series for %s failed: %s", agent_id, e)
+            pnl_series = []
     # What this run put into the world (FEAT-100). Every input is already on this
     # stack; the only new I/O is the actions log, and a run without one simply
     # gets no tick numbers.
@@ -4333,7 +4384,9 @@ async def shutdown_strategy(
     await _wind_down_all(
         engines,
         "shut down",
-        lambda e: e._run_shutdown(reason="manual emergency stop"),
+        # Engine-held and shielded: this request being cancelled (uvicorn's
+        # graceful-shutdown timeout on a restart) must not cancel the winddown.
+        lambda e: e.shutdown(reason="manual emergency stop"),
     )
     return {"shutdown": True}
 
@@ -4462,6 +4515,20 @@ def _reset_ownership_caches(who: str) -> None:
         log.debug("%s: could not reset the fleet map cache", who, exc_info=True)
 
 
+def _require_strategy_server_reach(strategy, user: WebUser, session_dir=None) -> None:
+    """Refuse an ownership repair on a fleet the caller cannot reach (WR-01).
+
+    A claim moves a bot's PnL onto this strategy's book and an unclaim takes it
+    off, so both are statements about the server the strategy trades on. A
+    strategy that names no server has nothing to reach and passes.
+    """
+    server = _strategy_server(strategy.home, strategy.default_config, session_dir)
+    if server and not _may_use_strategy_server(
+        server, _strategy_principal(strategy, user)
+    ):
+        raise HTTPException(status_code=403, detail="No access")
+
+
 @router.post("/{slug}/strategies/{sslug}/claim-bot")
 async def claim_bot(
     slug: str,
@@ -4499,6 +4566,7 @@ async def claim_bot(
     from condor.agents.config import load_full_config
     from condor.agents.journal import iter_session_dirs
     from condor.agents.ownership import (
+        LEDGER_FILENAME,
         BotLedger,
         bot_namespace,
         declared_names,
@@ -4507,6 +4575,7 @@ async def claim_bot(
     )
 
     strategy = _get_strategy(slug, sslug)
+    _require_no_foreign_live_run(slug, sslug, user)
 
     base = strip_deploy_suffix((req.bot_name or "").strip())
     if not base:
@@ -4528,20 +4597,26 @@ async def claim_bot(
             "Start it once, then claim.",
         )
 
+    _require_strategy_server_reach(strategy, user, session_dir)
+
     # A claim is the same authority that disowns, so it outranks a standing
     # disown rather than being silently skipped by the next adoption pass.
     reown(strategy.home, base)
 
     namespace = bot_namespace(slug, sslug)
     config = load_full_config(strategy.home, strategy.default_config)
-    # ``enforced=False``: the claim is the evidence, and the namespace rule is
-    # exactly what a hand-deployed bot fails. ``declared`` carries the name so a
-    # later reopen of this ledger still reads it as owned.
+    # The claim is the evidence, and the namespace rule is exactly what a
+    # hand-deployed bot fails — but that intent travels in ``declared`` (and in
+    # the recorded entry itself), which is what makes a later reopen of this
+    # ledger still read the bot as owned. The session's own ``enforced`` is not
+    # this route's to restate: ``None`` recovers what the session wrote, so a
+    # claim cannot rewrite a controller-mode session as unenforced (WR-01). A
+    # session with no ledger yet has nothing to recover and stays unenforced.
     ledger = BotLedger(
         namespace,
         session_dir,
         declared=[*declared_names(config, namespace), base],
-        enforced=False,
+        enforced=None if (session_dir / LEDGER_FILENAME).exists() else False,
     )
     ledger.adopt(base, req.since or None)
     for live in _live_ledgers(slug, sslug, session_dir):
@@ -4585,10 +4660,13 @@ async def unclaim_bot(
     from condor.agents.ownership import disown, strip_deploy_suffix
 
     strategy = _get_strategy(slug, sslug)
+    _require_no_foreign_live_run(slug, sslug, user)
 
     base = strip_deploy_suffix((req.bot_name or "").strip())
     if not base:
         raise HTTPException(status_code=400, detail="No bot name given")
+
+    _require_strategy_server_reach(strategy, user)
 
     result = disown(strategy.home, base)
     live = sum(1 for ledger in _live_ledgers(slug, sslug) if ledger.forget(base))
@@ -5089,8 +5167,15 @@ async def _controller_client(user: WebUser, server_name: str):
     try:
         return await get_config_manager().get_client(server_name)
     except Exception as exc:
+        # The exception's own string carries the backend address — log it, show
+        # the caller only the safe description (SEC-116, WR-09).
+        from condor.fetchers.executors import describe_executor_error
+
+        log.warning("get_client(%s) failed: %s", server_name, exc)
         raise HTTPException(
-            status_code=502, detail=f"Server '{server_name}' is unreachable: {exc}"
+            status_code=502,
+            detail=f"Server '{server_name}' is unreachable: "
+            f"{describe_executor_error(exc)[1]}",
         )
 
 
@@ -5119,9 +5204,12 @@ async def list_agent_controllers(
         try:
             client = await get_config_manager().get_client(server_name)
         except Exception as exc:
+            from condor.fetchers.executors import describe_executor_error
+
+            log.warning("get_client(%s) failed: %s", server_name, exc)
+            detail = describe_executor_error(exc)[1]
             statuses = {
-                src.name: ServerStatus("unreachable", detail=str(exc))
-                for src in sources
+                src.name: ServerStatus("unreachable", detail=detail) for src in sources
             }
         else:
             statuses = await controller_statuses(client, sources)

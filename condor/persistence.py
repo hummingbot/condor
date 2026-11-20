@@ -14,6 +14,8 @@ import io
 import logging
 import os
 import pickle
+import shutil
+import time
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -128,15 +130,42 @@ class SafePicklePersistence(PicklePersistence):
         else:
             # Both files missing or corrupt – start fresh
             if self.filepath.exists() or bak_path.exists():
+                kept = self._quarantine_unreadable(self.filepath, bak_path)
                 logger.error(
                     "Both pickle and backup are corrupt/unreadable. "
-                    "Starting with empty state."
+                    "Starting with empty state. Copies kept at: %s",
+                    ", ".join(str(p) for p in kept) or "(copy failed)",
                 )
             self.conversations = {}
             self.user_data = {}
             self.chat_data = {}
             self.bot_data = self.context_types.bot_data()
             self.callback_data = None
+
+    @staticmethod
+    def _quarantine_unreadable(*files: Path) -> list[Path]:
+        """Copy files that would not load to ``<name>.unreadable-<timestamp>``.
+
+        Starting empty is survivable; what is not is the next two flushes
+        (ST-09): the first rotates the unreadable main file over ``.bak``, the
+        second replaces that with the near-empty state, and about twenty
+        seconds after boot nothing recoverable is left. "Would not load" is far
+        more often a pickled class that moved in a refactor than a damaged
+        file, so the bytes are usually perfectly good to whoever restores the
+        import. Copied, not moved, so the load-and-rotate path is unchanged.
+        """
+        stamp = time.strftime("%Y%m%dT%H%M%S")
+        kept: list[Path] = []
+        for path in files:
+            if not path.exists():
+                continue
+            target = path.with_name(f"{path.name}.unreadable-{stamp}")
+            try:
+                shutil.copy2(path, target)
+                kept.append(target)
+            except OSError:
+                logger.exception("Could not keep a copy of unreadable %s", path)
+        return kept
 
     def _try_load(self, path: Path) -> Optional[Dict[str, Any]]:
         """Attempt to load a pickle file, returning None on failure."""

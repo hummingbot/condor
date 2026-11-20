@@ -8,6 +8,9 @@ the LLM never has to report who is writing.
 from condor.memory import MemoryStore
 from mcp_servers.condor.settings import settings
 
+SEARCH_DEFAULT_LIMIT = 10
+AUDIT_DEFAULT_LIMIT = 30
+
 
 def _source() -> str:
     return f"agent:{settings.specialist_slug}" if settings.specialist_slug else "chat"
@@ -26,8 +29,12 @@ async def manage_memory(
     description: str | None = None,
     type: str = "fact",
     query: str | None = None,
-    max_entries: int = 30,
+    max_entries: int | None = None,
 ) -> dict:
+    # Per-action defaults: a search page is short because its hits are ranked
+    # and carry snippets (ST-12); the audit tail keeps its 30.
+    search_limit = SEARCH_DEFAULT_LIMIT if max_entries is None else max_entries
+    audit_limit = AUDIT_DEFAULT_LIMIT if max_entries is None else max_entries
     store = _store()
 
     if action == "write":
@@ -46,7 +53,10 @@ async def manage_memory(
     elif action == "search":
         if not query:
             return {"error": "query is required for search"}
-        return {"results": store.search(query, limit=max_entries)}
+        results, total = store.search_with_total(query, limit=search_limit)
+        # ``total`` tells the caller whether narrowing the query is worth it;
+        # a hit's full text is one ``read`` away.
+        return {"results": results, "total": total}
 
     elif action == "list":
         return {"index": store.list_index()}
@@ -60,6 +70,6 @@ async def manage_memory(
         return {"deleted": True, "name": name}
 
     elif action == "audit":
-        return {"entries": store.audit(limit=max_entries)}
+        return {"entries": store.audit(limit=audit_limit)}
 
     return {"error": f"Unknown action: {action}"}

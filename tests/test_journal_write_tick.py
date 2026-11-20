@@ -197,3 +197,113 @@ def test_the_tick_prompt_risk_block_comes_from_the_shared_renderer():
 
     assert prompts.render_risk_lines is journal.render_risk_lines
     assert "Position Size:" not in inspect.getsource(prompts)
+
+
+# ── Backslashes in model/error text are stored verbatim (AG2-01) ──
+#
+# ``_replace_section`` handed the section body to ``re.subn`` as a replacement
+# *template*, so ``\d`` raised ``re.error``, ``\n`` became a newline, ``\1``
+# injected the section header and ``\\d`` was stored as ``\d`` — which then made
+# every later append raise, because the whole section is re-submitted each time.
+
+_BACKSLASH_TEXTS = [
+    r"range \d+ ok",
+    r"path C:\\Users\\dev",
+    r"line1\nline2",
+    r"group \1 here",
+    r"template \g<1> here",
+    r"spread \approx 5 \times 2",
+]
+
+
+@pytest.mark.parametrize("text", _BACKSLASH_TEXTS)
+def test_a_tick_summary_with_a_backslash_is_stored_verbatim(tmp_path, text):
+    from condor.agents.journal import JournalManager
+
+    journal = JournalManager("agt.grid", session_dir=tmp_path / "s")
+
+    journal.record_tick(text, 0)
+    assert journal._get_section("Ticks").splitlines()[-1].endswith(f"| {text}")
+
+    # The stored line is re-submitted on every append: it must not poison them,
+    # neither in this process nor for a fresh manager on the same directory.
+    journal.record_tick("next", 0)
+    JournalManager("agt.grid", session_dir=tmp_path / "s").record_tick("again", 0)
+    ticks = journal._get_section("Ticks").splitlines()
+    assert ticks[-3].endswith(f"| {text}")
+    assert ticks[-1].endswith("| again")
+
+
+@pytest.mark.parametrize("text", _BACKSLASH_TEXTS)
+def test_every_section_writer_keeps_a_backslash_verbatim(tmp_path, text):
+    from condor.agents.journal import JournalManager
+
+    journal = JournalManager("agt.grid", session_dir=tmp_path / "s")
+
+    journal.append_action(3, "deploy", text)
+    journal.append_error(text)
+    journal.write_state(text)
+
+    decisions = journal._get_section("Decisions").splitlines()
+    assert decisions[-2].endswith(f"deploy -- {text}")
+    assert decisions[-1].endswith(f") {text}")
+    assert journal._get_section("Summary") == text
+    assert journal.read_full().count("## Decisions") == 1
+
+
+# ── An unknown entry type is not an action (MC-13) ──
+
+
+@pytest.mark.parametrize("entry_type", ["decision", "Action", "note", ""])
+def test_an_unknown_entry_type_is_refused_not_filed_as_an_action(engine, entry_type):
+    """It fell through to ``append_action`` — under tick 0 when none was passed."""
+    result = _write(entry_type=entry_type, tick=8)
+
+    assert "Unknown entry_type" in result["error"]
+    for known in ("action", "learning", "state", "canvas"):
+        assert known in result["error"]
+    assert not (engine.session_dir / "journal.md").exists()
+
+
+def test_an_unknown_entry_type_with_no_tick_writes_no_tick_zero_entry(engine):
+    result = _write(entry_type="decision")
+
+    assert "error" in result
+    assert not (engine.session_dir / "journal.md").exists()
+
+
+def test_the_registered_tools_declare_the_same_members_as_literals():
+    """The schema rejects a typo before the call; the impl is the backstop."""
+    import inspect
+    from typing import get_args
+
+    from mcp_servers.condor import server
+
+    params = inspect.signature(server.trading_agent_journal_write).parameters
+    assert (
+        get_args(params["entry_type"].annotation) == trading_agent.JOURNAL_ENTRY_TYPES
+    )
+    section = get_args(get_args(params["section"].annotation)[0])
+    assert section == canvas.CANVAS_SECTIONS
+    category = get_args(get_args(params["category"].annotation)[0])
+    assert category == ("market", "execution")
+
+
+def test_an_omitted_category_and_section_still_write(engine):
+    """The tool passes ``None`` for both when the caller leaves them out."""
+    assert _write(entry_type="learning", category=None) == {"written": True}
+    assert _write(entry_type="action", tick=3, section=None, category=None) == {
+        "written": True
+    }
+
+
+def test_an_unknown_read_section_is_an_error_not_recent(engine):
+    result = trading_agent.journal_read(AGENT_ID, section="decisions")
+
+    assert "Unknown section 'decisions'" in result["error"]
+    assert "run:N" in result["error"]
+
+
+@pytest.mark.parametrize("section", ["recent", "learnings", "summary", "state", "runs"])
+def test_the_documented_read_sections_still_answer(engine, section):
+    assert "error" not in trading_agent.journal_read(AGENT_ID, section=section)

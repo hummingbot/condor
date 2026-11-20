@@ -157,10 +157,7 @@ describe("Dex pool pager", () => {
     expect(text()).toContain("BONK-SOL");
     expect(button("Next")?.disabled).toBe(false);
 
-    await click("Search");
-    expect(text()).not.toContain("BONK-SOL");
-    expect(text()).toContain("Paste a pool or token address to find it.");
-
+    // Search is no longer a tab: typing into the always-visible field is it.
     await type("SOL-USDC");
     await settle(450); // past the search debounce
     expect(text()).not.toContain("BONK-SOL");

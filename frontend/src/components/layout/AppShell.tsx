@@ -58,7 +58,7 @@ function AppShellBody() {
   const inAgentsSection = pathname === "/hub" || pathname.startsWith("/agents/");
   const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
-  const { hasKeys, isLoading: keysLoading } = useCredentials();
+  const { hasKeys, isLoading: keysLoading, isError: keysError } = useCredentials();
   const [reportOpen, setReportOpen] = useState(false);
 
   // A pathname is enough: every full-bleed screen is its own route.
@@ -76,8 +76,10 @@ function AppShellBody() {
   // prefixes every route in the app.
   // `/hub` reads Botcamp, never an exchange, so it needs no keys either.
   const exemptRoutes = ["/routines", "/settings", "/hub"];
+  // Not while the keys are unknown either: a failed credentials request is an
+  // outage to report, not a user to send off to connect an exchange (FU-02).
   const showKeysOverlay =
-    server && !keysLoading && !hasKeys && pathname !== "/" &&
+    server && !keysLoading && !keysError && !hasKeys && pathname !== "/" &&
     !exemptRoutes.some((r) => pathname.startsWith(r));
 
   // ⌘K used to toggle the overlay panel. It now goes to the chat, so the

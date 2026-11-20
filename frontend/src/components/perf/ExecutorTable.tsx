@@ -372,6 +372,39 @@ export function ExecutorTable({
 
 // ── Detail Panel ──
 
+/**
+ * The detail panel for an executor *id*, read off the list every frame.
+ *
+ * A host that kept the clicked row's object showed that frame forever: every
+ * later frame replaces the array with new objects, so the table row beside the
+ * panel moved while the panel's PnL, price, status and Stop button stood still.
+ * Holding the id and looking the executor up each render is what keeps the two
+ * in step. When the id drops out of the list the last frame that carried it
+ * stays up, marked as such.
+ */
+export function LiveDetailPanel({
+  executorId,
+  executors,
+  ...panel
+}: {
+  executorId: string;
+  executors: ExecutorInfo[];
+} & Omit<Parameters<typeof DetailPanel>[0], "executor" | "gone">) {
+  const live = useMemo(
+    () => executors.find((ex) => ex.id === executorId),
+    [executors, executorId],
+  );
+  // The last frame that carried this id, kept for when none does. Adjusted
+  // during render, as derived state is: an effect would paint the stale frame
+  // once first.
+  const [lastSeen, setLastSeen] = useState(live);
+  if (live && live !== lastSeen) setLastSeen(live);
+
+  const shown = live ?? (lastSeen?.id === executorId ? lastSeen : undefined);
+  if (!shown) return null;
+  return <DetailPanel {...panel} executor={shown} gone={!live} />;
+}
+
 export function DetailPanel({
   executor,
   server,
@@ -381,6 +414,7 @@ export function DetailPanel({
   rateFormatPnl,
   rateFormatValue,
   rateFormatDetailed,
+  gone = false,
 }: {
   executor: ExecutorInfo;
   server: string;
@@ -388,6 +422,12 @@ export function DetailPanel({
   /** Omit for a read-only panel: no Stop button is drawn without it. */
   onStop?: (id: string) => void;
   stopping?: boolean;
+  /**
+   * The executor has left the list this panel reads from, so what it shows is
+   * the last frame that carried it. Said in the panel, and Stop is withheld:
+   * its status is no longer known.
+   */
+  gone?: boolean;
   rateFormatPnl?: (val: number, quote: string) => string;
   rateFormatValue?: (val: number, quote: string) => string;
   rateFormatDetailed?: (val: number, quote: string) => string;
@@ -466,7 +506,7 @@ export function DetailPanel({
               <TrendingUp className="h-3 w-3" />
               Trade
             </button>
-            {onStop && isExecutorActive(executor.status) && (
+            {onStop && !gone && isExecutorActive(executor.status) && (
               <button
                 onClick={() => onStop(executor.id)}
                 disabled={stopping}
@@ -486,6 +526,15 @@ export function DetailPanel({
             </button>
           </div>
         </div>
+
+        {gone && (
+          <p
+            data-detail-gone
+            className="border-b border-[var(--color-border)] px-5 py-2 text-[11px] text-[var(--color-text-muted)]"
+          >
+            No longer in the list — showing the last values received.
+          </p>
+        )}
 
         <div className="p-5 space-y-5">
           {/* Status & Meta */}

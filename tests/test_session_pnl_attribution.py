@@ -1270,6 +1270,77 @@ def test_session_detail_stops_accruing_after_release(tmp_path):
     assert detail.executors == []  # the open rows belong to nobody now
 
 
+def test_session_detail_route_walks_a_live_sessions_history_once(monkeypatch, tmp_path):
+    """WR-04: the figures and the curve come off one history walk.
+
+    The route used to await the performance fetch — which already fetches the
+    histories its windows are sliced from — and then start a second, independent
+    history fetch for the curve, on a 10s poll.
+    """
+    from condor.agents import performance as perf_mod
+    from condor.fetchers.bot_performance import (
+        clear_archived_cache,
+        clear_history_cache,
+        clear_live_names_cache,
+        clear_snapshot_cache,
+    )
+    from condor.web.routes import agents as mod
+
+    def _clear():
+        clear_snapshot_cache()
+        clear_archived_cache()
+        clear_history_cache()
+        clear_live_names_cache()
+
+    sd1 = _write_session(tmp_path, 1)
+    _write_ledger(sd1, {"ns-bot": _epoch(T2)})  # still held: the window is open
+    inst = "ns-bot-20260701-000000"
+    snapshots = [_snap(inst, T3, realized=100.0)]
+    history = {inst: [_hist_row(T0, 0.0), _hist_row(T2, 40.0), _hist_row(T3, 100.0)]}
+    client = _executorless(_FakeClient(snapshots, history))
+
+    async def _fake_client(*_a, **_kw):
+        return client, "srv", ""
+
+    standalone: list = []
+    real_series = perf_mod.fetch_agent_pnl_series
+
+    async def _counting_series(*a, **kw):
+        standalone.append(a)
+        return await real_series(*a, **kw)
+
+    monkeypatch.setattr(perf_mod, "fetch_agent_pnl_series", _counting_series)
+    monkeypatch.setattr(
+        mod,
+        "_get_strategy",
+        lambda slug, sslug: type("S", (), {"home": tmp_path, "default_config": {}})(),
+    )
+    monkeypatch.setattr(mod, "_get_client_for_strategy", _fake_client)
+    monkeypatch.setattr(mod, "_strategy_principal", lambda *_a: None)
+    monkeypatch.setattr(
+        mod,
+        "enumerate_agent_ids",
+        lambda run_key, home: [(f"{run_key}_1", 1, "session")],
+    )
+
+    _clear()
+    try:
+        out = asyncio.run(mod.get_session_executors("ns", "st", 1, user=object()))
+        walked = list(client.history_calls)
+
+        # The curve the standalone fetch would have drawn, for comparison.
+        _clear()
+        expected = asyncio.run(real_series(client, ["ns-bot"], _epoch(T2)))
+    finally:
+        _clear()
+
+    assert standalone == [], "the route did not start a second history fetch"
+    assert walked == [inst], "one walk of the one instance"
+    assert out["performance"]["realized_pnl"] == 60.0
+    assert out["pnl_series"] and out["pnl_series"][-1]["pnl"] == 60.0
+    assert [p["pnl"] for p in out["pnl_series"]] == [p["pnl"] for p in expected]
+
+
 def test_session_detail_route_prices_a_released_session(monkeypatch, tmp_path):
     """The route itself: KPI and curve both stop at the release instant."""
     from condor.web.routes import agents as mod

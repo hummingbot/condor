@@ -32,6 +32,13 @@ from condor.runtime.registry_file import (
 
 log = logging.getLogger(__name__)
 
+# How long ``LoopSupervisor.stop_all`` waits for the plain stops, together. A
+# stop is a cancel plus the teardown's API work: the order sweep, bounded by the
+# client's 60s total timeout per request, and the close-out report, capped at
+# 30s. Past this the process is exiting on a hung API and waiting longer only
+# delays the boot pass that will reconcile whatever is left.
+STOP_ALL_DEADLINE_SEC = 180.0
+
 
 @dataclass
 class InterruptedRun:
@@ -263,8 +270,35 @@ class LoopSupervisor:
         finish, bounded by the LLM cleanup timeout (``resolve_tick_timeout``,
         default 10 min), and returns False. That run was ended by the winddown,
         which recorded STOPPED itself, so it is not overwritten with SUSPENDED.
+
+        Every stop goes out at once (AG1-12). One at a time, exit time grew
+        with the loop count -- each stop can cost an API timeout plus the
+        close-out -- and a run not reached before the process was killed read
+        as crashed on the next boot. Each stop is isolated, so one that raises
+        costs the others nothing.
+
+        The plain stops share ``STOP_ALL_DEADLINE_SEC``. One still going at the
+        deadline is cancelled and logged, and is NOT recorded SUSPENDED: its
+        teardown was cut short. The cancel lands inside the engine's
+        ``_finish``, whose ``finally`` unregisters it as STOPPED whatever was
+        skipped -- on disk, exactly what an owner's stop writes, so the next
+        boot would neither report the run nor honour its ``restart_on_boot``.
+        Such a run is therefore put back to RUNNING once its cancelled stop has
+        returned: the live state the next boot reconciles as interrupted, which
+        is what happened to it (its order sweep or close-out did not finish).
+        A run that was ending itself (``max_ticks``, an error) keeps the final
+        state it wrote. The deadline does not apply to an engine mid-winddown:
+        that wait has its own bound, above, and giving up on it would let the
+        process exit under an emergency close.
+
+        The deadline is not a hard bound on a stop still waiting for its
+        cancelled tick task: ``TickEngine.stop`` cannot tell that cancel from
+        its own and carries on into the teardown, which then runs to the end.
+        That stop finishes cleanly and records SUSPENDED itself; the bound on
+        it is the caller's (``main._teardown_engines_timeout``).
         """
-        for engine in list(self._engines.values()):
+
+        async def _stop_one(engine) -> None:
             try:
                 stopped = await engine.stop()
             except Exception:
@@ -272,6 +306,59 @@ class LoopSupervisor:
             else:
                 if stopped:
                     self.record(engine, LoopState.SUSPENDED)
+
+        plain: dict[asyncio.Task, Any] = {}
+        winding: list[asyncio.Task] = []
+        for engine in list(self._engines.values()):
+            task = asyncio.create_task(_stop_one(engine))
+            if getattr(engine, "_shutting_down", False):
+                winding.append(task)
+            else:
+                plain[task] = engine
+        if plain:
+            _, late = await asyncio.wait(plain, timeout=STOP_ALL_DEADLINE_SEC)
+            for task in late:
+                log.error(
+                    "Engine %s did not stop within %.0fs; giving up on it — its "
+                    "resting orders may not have been swept and it is not "
+                    "recorded as suspended",
+                    plain[task].agent_id,
+                    STOP_ALL_DEADLINE_SEC,
+                )
+                task.cancel()
+            if late:
+                await asyncio.gather(*late, return_exceptions=True)
+            for task in late:
+                self._mark_cut_short(task, plain[task])
+        if winding:
+            await asyncio.gather(*winding, return_exceptions=True)
+
+    def _mark_cut_short(self, task: asyncio.Task, engine) -> None:
+        """Leave a stop the deadline cut off in a state the next boot settles.
+
+        Only for a stop that really was cancelled (one that swallowed the
+        cancel and finished recorded SUSPENDED itself) and only when the state
+        on disk is the STOPPED this very stop wrote on its way out: a run that
+        was ending on its own keeps its COMPLETED/ERROR, and one that never
+        reached the unregister is still in a live state already.
+        """
+        if not task.cancelled():
+            return
+        if getattr(engine, "_last_stop_reason", "") != "user":
+            return
+        session_dir = getattr(engine, "session_dir", None)
+        if session_dir is None:
+            return
+        try:
+            if (read_status(session_dir) or {}).get("state") != LoopState.STOPPED:
+                return
+            self.record(engine, LoopState.RUNNING)
+        except Exception:
+            log.exception(
+                "Could not mark engine %s as interrupted after its stop was "
+                "cut short",
+                engine.agent_id,
+            )
 
     # ── Boot reconciliation ──
 

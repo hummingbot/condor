@@ -1,14 +1,16 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 
 import { useCandleStore } from "@/hooks/useCandleStore";
 import { useRates } from "@/hooks/useRates";
-import { api, type ConsolidatedPosition } from "@/lib/api";
+import { api, type CandleData, type ConsolidatedPosition } from "@/lib/api";
 import { candleChannelKey, candleStore } from "@/lib/candle-store";
 import type { ChartLineSlot, ExtraLine, PickSlot } from "@/components/executor/types";
 import { createOverlayTooltipView, getExecutorColor, type ExecutorOverlay } from "@/lib/executor-overlays";
 import { getThemeColors, pnlHexColor, withAlpha } from "@/lib/theme-colors";
 import { roundToPricePrecision } from "@/lib/formatters";
+import { keptLookbackSeconds } from "@/lib/gridExecutor";
+import { queryClient } from "@/lib/queryClient";
 import { createDragHitPrimitive, type DragTarget } from "./priceLineDrag";
 import { usePriceLineDrag } from "./usePriceLineDrag";
 
@@ -61,6 +63,55 @@ export interface ChartPriceAxis {
   onScaleChange(cb: () => void): () => void;
 }
 
+/**
+ * How many newer candles the live listener will `update()` one by one before a
+ * single `setData()` is the cheaper way to say the same thing.
+ */
+const MAX_INCREMENTAL_BARS = 50;
+
+/** The tail of `stored` the picker's range names, measured from the newest candle. */
+function rangeTail(stored: CandleData[], lookbackSeconds: number): CandleData[] {
+  if (!stored.length) return stored;
+  const cutoff = stored[stored.length - 1].timestamp - lookbackSeconds;
+  const start = stored.findIndex((c) => c.timestamp >= cutoff);
+  return start <= 0 ? stored : stored.slice(start);
+}
+
+/** `604800` → `"7d"`: a range, in the unit the picker names it in. */
+function formatSpan(seconds: number): string {
+  if (seconds >= 86400) return `${+(seconds / 86400).toFixed(1)}d`;
+  if (seconds >= 3600) return `${+(seconds / 3600).toFixed(1)}h`;
+  return `${Math.round(seconds / 60)}m`;
+}
+
+function toBar(c: CandleData) {
+  return {
+    time: c.timestamp as import("lightweight-charts").UTCTimestamp,
+    open: c.open,
+    high: c.high,
+    low: c.low,
+    close: c.close,
+  };
+}
+
+/**
+ * Whether `next` differs from what the chart drew (`drawn`) anywhere *before*
+ * the last drawn bar — a bar inserted or rewritten where `series.update()`
+ * cannot reach. Bars that slid out of the front of the range are not a change:
+ * the chart simply keeps them.
+ */
+function olderBarsChanged(drawn: CandleData[], next: CandleData[], lastDrawnTs: number): boolean {
+  let i = 0;
+  for (const c of next) {
+    if (c.timestamp >= lastDrawnTs) break;
+    while (i < drawn.length && drawn[i].timestamp < c.timestamp) i++;
+    const d = drawn[i];
+    if (!d || d.timestamp !== c.timestamp) return true;
+    if (d.open !== c.open || d.high !== c.high || d.low !== c.low || d.close !== c.close) return true;
+  }
+  return false;
+}
+
 interface TradeChartProps {
   server: string;
   connector: string;
@@ -71,6 +122,8 @@ interface TradeChartProps {
    * the pair. Set by the DEX pool workspace; every CLOB chart omits it.
    */
   poolAddress?: string;
+  /** The venue's candles are GeckoTerminal-polled; sets the stalled-feed bound. */
+  geckoCandles?: boolean;
   lookbackSeconds: number;
   startPrice: number;
   endPrice: number;
@@ -100,6 +153,7 @@ export function TradeChart({
   pair,
   interval,
   poolAddress,
+  geckoCandles,
   lookbackSeconds,
   startPrice,
   endPrice,
@@ -200,12 +254,13 @@ export function TradeChart({
   });
 
   // ── Candle data from the singleton store (WS live + cached) ──
-  const { candles: storedCandles, mergeCandles, setDuration } = useCandleStore(
+  const { candles: storedCandles, isStale, mergeCandles, setDuration } = useCandleStore(
     server,
     connector,
     pair,
     interval,
     poolAddress,
+    geckoCandles,
   );
 
   // ── Only the picked range is drawn ──
@@ -214,12 +269,10 @@ export function TradeChart({
   // chart's range. So the chart draws the tail its own picker names, measured
   // back from the newest candle rather than the clock, which would make render
   // impure.
-  const candles = useMemo(() => {
-    if (!storedCandles.length) return storedCandles;
-    const cutoff = storedCandles[storedCandles.length - 1].timestamp - lookbackSeconds;
-    const start = storedCandles.findIndex((c) => c.timestamp >= cutoff);
-    return start <= 0 ? storedCandles : storedCandles.slice(start);
-  }, [storedCandles, lookbackSeconds]);
+  const candles = useMemo(
+    () => rangeTail(storedCandles, lookbackSeconds),
+    [storedCandles, lookbackSeconds],
+  );
 
   // ── Filter executor overlays to those within candle time range ──
   // Depend on the earliest candle timestamp (not the candles array, whose reference
@@ -237,6 +290,9 @@ export function TradeChart({
     });
   }, [executorOverlays, minCandleTime, selectedExecutorId]);
 
+  // How much of the picked range this interval can actually show.
+  const keptSeconds = keptLookbackSeconds(lookbackSeconds, interval);
+
   // ── REST backfill on pair/interval/lookback change ──
   // The dependency array below is the whole gate: React re-runs this only when
   // one of those six changes. A ref remembering the last key would add nothing
@@ -244,29 +300,76 @@ export function TradeChart({
   // effect twice — the first cleanup throws the in-flight fetch away, and a ref
   // that outlives the remount would make the second pass a no-op, leaving the
   // chart with no history at all.
+  //
+  // How it went is kept, because "no candles", "the request failed" and "still
+  // asking" all used to look like the same empty pane.
+  const [backfill, setBackfill] = useState<"loading" | "done" | "failed">("loading");
+  // Bumped by Retry: the one way to re-run the effect with nothing else changed.
+  const [retryNonce, setRetryNonce] = useState(0);
   useEffect(() => {
-    setDuration(lookbackSeconds);
+    setBackfill("loading");
+    // Asked for, and kept, only as far back as the candle budget reaches at
+    // this interval: a longer request downloads history the store would evict
+    // on arrival. The pages step the interval up so this rarely clamps; when
+    // it does, the chip over the chart says how much of the range is drawn.
+    setDuration(keptSeconds);
 
     let cancelled = false;
-    const startTime = Math.floor(Date.now() / 1000) - lookbackSeconds;
+    const startTime = Math.floor(Date.now() / 1000) - keptSeconds;
 
     const fetchWithRetry = (attempt: number) => {
       if (cancelled) return;
       api
         .getCandles(server, connector, pair, interval, 5000, startTime, undefined, poolAddress)
         .then((fetched) => {
-          if (!cancelled && fetched?.length) mergeCandles(fetched);
+          if (cancelled) return;
+          if (fetched?.length) mergeCandles(fetched);
+          setBackfill("done");
         })
         .catch(() => {
-          if (!cancelled && attempt < 2) {
+          if (cancelled) return;
+          if (attempt < 2) {
             setTimeout(() => fetchWithRetry(attempt + 1), 2000 * (attempt + 1));
+          } else {
+            setBackfill("failed");
           }
         });
     };
     fetchWithRetry(0);
 
     return () => { cancelled = true; };
-  }, [server, connector, pair, interval, poolAddress, lookbackSeconds]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [server, connector, pair, interval, poolAddress, keptSeconds, retryNonce]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── What the stream last said about this channel ──
+  // `shared-socket` files the backend's stream error under this key and until
+  // now nothing read it. Read off the cache directly rather than through a
+  // query hook: there is nothing to fetch, only a value to follow.
+  const streamError = useSyncExternalStore(
+    useCallback((onChange: () => void) => queryClient.getQueryCache().subscribe(onChange), []),
+    () => {
+      const status = queryClient.getQueryData<{ status: string; message?: string }>([
+        "candles-status", server, connector, pair, interval,
+      ]);
+      return status?.status === "error" ? (status.message ?? "Unknown error") : null;
+    },
+  );
+
+  // ── One answer to "what is this chart showing?" ──
+  //   loading — nothing to draw yet and the history request is still out
+  //   error   — the history request failed (three tries) or the stream errored
+  //   empty   — the request came back and there are no candles for this market
+  //   stale   — candles are drawn, but the feed has stopped delivering
+  //   live    — the normal chart, which says nothing
+  const hasCandles = storedCandles.length > 0;
+  const feedState: "loading" | "error" | "empty" | "stale" | "live" =
+    backfill === "failed" || (streamError && !hasCandles)
+      ? "error"
+      : !hasCandles
+        ? backfill === "loading" ? "loading" : "empty"
+        : isStale
+          ? "stale"
+          : "live";
+  const retryFeed = () => setRetryNonce((n) => n + 1);
 
   // ── Initialize chart ONCE ──
   useEffect(() => {
@@ -558,6 +661,13 @@ export function TradeChart({
   // pair/interval/range switch, history backfill/prepend) apart from a live
   // tick, where the listener below already applied a cheap series.update().
   const lastSetDataSigRef = useRef<string>("");
+  // What the series currently holds, and for which channel. The live listener
+  // diffs each store frame against it: a frame can carry many candles (the
+  // whole-buffer snapshot after a WS reconnect, a REST-fallback poll), and
+  // every one newer than the last drawn bar has to reach the chart.
+  const drawnRef = useRef<{ key: string; bars: CandleData[] } | null>(null);
+  const lookbackRef = useRef(lookbackSeconds);
+  lookbackRef.current = lookbackSeconds;
 
   // ── Push candle data to chart (full setData only on structural changes) ──
   useEffect(() => {
@@ -592,35 +702,48 @@ export function TradeChart({
 
     if (!needsFullReset) return;
 
-    const mapped = candles.map((c) => ({
-      time: c.timestamp as import("lightweight-charts").UTCTimestamp,
-      open: c.open,
-      high: c.high,
-      low: c.low,
-      close: c.close,
-    }));
-    seriesRef.current.setData(mapped);
+    seriesRef.current.setData(candles.map(toBar));
+    drawnRef.current = { key, bars: candles };
 
     // Every full render is a new picture — a market, a range, or the history a
     // backfill just brought in — so the view fits it. Live ticks never get here.
     chartRef.current?.timeScale().fitContent();
   }, [candles, chartReady, server, connector, pair, interval, poolAddress, lookbackSeconds]);
 
-  // ── Real-time last candle update via candle store listener ──
+  // ── Real-time candle updates via candle store listener ──
+  // A store frame is not always one tick: a reconnect re-sends the whole
+  // buffer and the REST fallback broadcasts a list, so every candle from the
+  // last drawn bar forward is applied, oldest first — `update()` takes the last
+  // bar or a newer one, nothing else. A long gap, or a bar changed behind the
+  // last drawn one, is redrawn in one `setData()` instead, without refitting:
+  // the trader's zoom is theirs.
   useEffect(() => {
     if (!chartReady || !seriesRef.current) return;
     const key = candleChannelKey(server, connector, pair, interval, poolAddress);
 
     const removeListener = candleStore.onUpdate(key, (updated) => {
-      if (!seriesRef.current || !updated.length) return;
-      const last = updated[updated.length - 1];
-      seriesRef.current.update({
-        time: last.timestamp as import("lightweight-charts").UTCTimestamp,
-        open: last.open,
-        high: last.high,
-        low: last.low,
-        close: last.close,
-      });
+      const series = seriesRef.current;
+      const drawn = drawnRef.current;
+      // Nothing drawn for this channel yet: the first full render belongs to
+      // the effect above, which runs on the same store frame.
+      if (!series || !updated.length || !drawn || drawn.key !== key || !drawn.bars.length) return;
+
+      const tail = rangeTail(updated, lookbackRef.current);
+      const lastDrawnTs = drawn.bars[drawn.bars.length - 1].timestamp;
+      const from = tail.findIndex((c) => c.timestamp >= lastDrawnTs);
+      // Every candle in the store is older than the last drawn bar: a stale
+      // frame, and `update()` would throw on it.
+      if (from < 0) return;
+
+      if (
+        tail.length - from > MAX_INCREMENTAL_BARS ||
+        olderBarsChanged(drawn.bars, tail, lastDrawnTs)
+      ) {
+        series.setData(tail.map(toBar));
+      } else {
+        for (let i = from; i < tail.length; i++) series.update(toBar(tail[i]));
+      }
+      drawnRef.current = { key, bars: tail };
     });
 
     return removeListener;
@@ -1124,6 +1247,65 @@ export function TradeChart({
           onPointerUp={handlePointerUp}
           onPointerCancel={drag.onPointerCancel}
         />
+        {keptSeconds < lookbackSeconds && (
+          <div
+            data-range-clamped
+            className="pointer-events-none absolute left-2 top-2 z-10 rounded border border-[var(--color-border)] bg-[var(--color-surface)]/90 px-2 py-0.5 text-[10px] text-[var(--color-text-muted)]"
+          >
+            Showing the last {formatSpan(keptSeconds)} of {formatSpan(lookbackSeconds)} at {interval} — pick a
+            coarser interval for the full range
+          </div>
+        )}
+        {/* Feed state — the chart alone cannot tell "nothing here" from "not
+            yet" from "broken" from "stopped". With no candles the pane says
+            which; with candles drawn it stays out of the way, as a chip. */}
+        {feedState !== "live" && !hasCandles && (
+          <div
+            data-feed-state={feedState}
+            role="status"
+            className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 text-xs text-[var(--color-text-muted)]"
+          >
+            {feedState === "loading" && <span>Loading candles…</span>}
+            {feedState === "empty" && (
+              <span>
+                No {interval} candles for {pair} on {connector}
+              </span>
+            )}
+            {feedState === "error" && (
+              <>
+                <span className="text-[var(--color-red)]">
+                  {streamError && backfill !== "failed"
+                    ? `Candle stream error: ${streamError}`
+                    : "Could not load candles"}
+                </span>
+                <button
+                  onClick={retryFeed}
+                  className="pointer-events-auto rounded border border-[var(--color-border)] px-2 py-0.5 text-[11px] text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
+                >
+                  Retry
+                </button>
+              </>
+            )}
+          </div>
+        )}
+        {(feedState === "stale" || (feedState === "error" && hasCandles)) && (
+          <div
+            data-feed-state={feedState}
+            role="status"
+            className="absolute right-16 top-2 z-10 flex items-center gap-2 rounded border border-[var(--color-yellow)]/40 bg-[var(--color-surface)]/90 px-2 py-0.5 text-[10px] text-[var(--color-yellow)]"
+          >
+            {feedState === "stale" ? (
+              <span>Feed stalled — prices may be out of date</span>
+            ) : (
+              <>
+                <span>History could not be loaded</span>
+                <button onClick={retryFeed} className="underline underline-offset-2 hover:no-underline">
+                  Retry
+                </button>
+              </>
+            )}
+          </div>
+        )}
         {/* Measure box overlay — pure DOM, never touches chart series */}
         <div
           ref={measureBoxRef}

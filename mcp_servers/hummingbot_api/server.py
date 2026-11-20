@@ -22,7 +22,10 @@ from mcp_servers.hummingbot_api.formatters import (
     format_gateway_config_result,
     format_gateway_swap_result,
 )
-from mcp_servers.hummingbot_api.hummingbot_client import hummingbot_client
+from mcp_servers.hummingbot_api.hummingbot_client import (
+    hummingbot_client,
+    trading_rules_cache,
+)
 from mcp_servers.hummingbot_api.middleware import GATEWAY_LOG_HINT, handle_errors
 from mcp_servers.hummingbot_api.profiles import AGENT_SEAT_PROFILES, PROFILE_TOOLS
 from mcp_servers.hummingbot_api.schemas import (
@@ -32,7 +35,11 @@ from mcp_servers.hummingbot_api.schemas import (
     GatewayConfigRequest,
     GatewaySwapRequest,
 )
-from mcp_servers.hummingbot_api.settings import DEFAULT_TOOL_PROFILE, settings
+from mcp_servers.hummingbot_api.settings import (
+    DEFAULT_TOOL_PROFILE,
+    credentials_were_injected,
+    settings,
+)
 from mcp_servers.hummingbot_api.tools import bot_management as bot_management_tools
 from mcp_servers.hummingbot_api.tools import controllers as controllers_tools
 from mcp_servers.hummingbot_api.tools import executor_create
@@ -90,9 +97,7 @@ def _credentials_were_injected() -> bool:
     external MCP host, the checked-in ``.mcp.json`` — sets neither, so it reads
     False and keeps the full configure-and-persist behaviour.
     """
-    return bool(
-        os.getenv("HUMMINGBOT_API_USERNAME") or os.getenv("HUMMINGBOT_API_PASSWORD")
-    )
+    return credentials_were_injected()
 
 
 @handle_errors("configure server")
@@ -113,8 +118,10 @@ async def configure_server(
 
     Args:
         name: Server label (e.g., 'macmini', 'production')
-        host: API host (e.g., 'localhost', 'host.docker.internal', '72.212.424.42')
-        port: API port (e.g., 8000)
+        host: API host (e.g., 'localhost', 'host.docker.internal', '72.212.424.42').
+            The current scheme (http/https) and port are kept; pass
+            'https://api.example.com' to change the scheme.
+        port: API port (e.g., 8000). OMIT to keep the current one.
         username: API username
         password: API password
     """
@@ -159,18 +166,47 @@ async def configure_server(
     from urllib.parse import urlparse
 
     parsed = urlparse(settings.api_url)
-    current_host = parsed.hostname or "localhost"
-    current_port = parsed.port or 8000
+    # The scheme is carried over, never rebuilt: an https server renamed with
+    # configure_server(name=...) used to be saved back as http://host:8000,
+    # which sends the API password in clear to a different port.
+    final_scheme = parsed.scheme or "http"
+    final_host = parsed.hostname or "localhost"
+    # A port is written only when there is one to write — given here, or
+    # already in the URL. https://api.example.com has none and must keep none.
+    final_port = parsed.port
+
+    if host is not None:
+        given = urlparse(host if "://" in host else f"//{host}")
+        if not given.hostname:
+            raise ToolError(
+                f"host must be a hostname or IP address, got {host!r} "
+                "(e.g. 'localhost', 'api.example.com')."
+            )
+        final_host = given.hostname
+        if given.scheme:
+            if given.scheme not in ("http", "https"):
+                raise ToolError(
+                    f"host scheme must be http or https, got {given.scheme!r}."
+                )
+            final_scheme = given.scheme
+        if given.scheme or given.port:
+            # A host that names its own scheme or port is a new endpoint; the
+            # old endpoint's port does not carry over to it.
+            final_port = given.port
+    if port is not None:
+        final_port = port
 
     final_name = name if name is not None else settings.server_name
-    final_host = host if host is not None else current_host
-    final_port = port if port is not None else current_port
     final_username = username if username is not None else settings.api_username
     final_password = password if password is not None else settings.api_password
 
+    netloc = f"[{final_host}]" if ":" in final_host else final_host
+    if final_port is not None:
+        netloc = f"{netloc}:{final_port}"
+
     new_config = ServerConfig(
         name=final_name,
-        url=f"http://{final_host}:{final_port}",
+        url=f"{final_scheme}://{netloc}",
         username=final_username,
         password=final_password,
     )
@@ -179,6 +215,10 @@ async def configure_server(
     save_server_config(new_config)
     settings.reload_from_server_config(new_config)
     await hummingbot_client.close()
+    # Rules are cached per (connector, pair) with no server in the key, so the
+    # old server's answers — and its cached misses — would otherwise vet the
+    # new server's creates for up to a minute.
+    trading_rules_cache.clear()
 
     try:
         await hummingbot_client.initialize(force=True)
@@ -332,13 +372,16 @@ async def search_history(
     Filters (only the ones listed for a data type are honoured; passing any other
     filter raises an error instead of silently ignoring it):
         account_names: All data types (optional)
-        connector_names: All data types (optional)
+        connector_names: All data types (optional). clmm_positions takes at most
+            ONE connector per call.
         limit: All data types (default: 50, max: 1000)
-        trading_pairs: orders, clmm_positions (optional)
+        trading_pairs: orders, clmm_positions (optional). clmm_positions takes at
+            most ONE pair per call.
         status: orders, clmm_positions (optional, e.g., 'FILLED', 'CANCELED')
         start_time: orders only, timestamp in seconds (optional)
         end_time: orders only, timestamp in seconds (optional)
-        offset: clmm_positions only, pagination offset (default: 0)
+        offset: clmm_positions only, pagination offset (default: 0). A full page
+            ends with the offset of the next one.
         cursor: orders only, the cursor printed at the end of the previous page
             (optional). orders is cursor-paginated and has no offset at all;
             clmm_positions is offset-paginated and takes no cursor.
@@ -788,6 +831,10 @@ async def create_position_executor(
     means the entry is not confirmed. Tell the user a position is open only when the
     result (or `get_executor`) shows it running with volume filled.
 
+    SAVED DEFAULTS. An optional parameter you omit takes the user's saved default if
+    one exists (`executor_defaults` shows them), else the backend default named below.
+    The result lists every saved default that was applied.
+
     Args:
         connector_name: Exchange connector, e.g. 'binance_perpetual'.
         trading_pair: Trading pair, e.g. 'BTC-USDT'.
@@ -795,7 +842,8 @@ async def create_position_executor(
         amount: Position size in BASE currency (see above).
         entry_price: Limit entry price. OMIT for a market entry.
         leverage: Leverage multiplier. Backend default 1.
-        stop_loss: Stop-loss as a decimal fraction, e.g. 0.02 = 2%.
+        stop_loss: Stop-loss as a decimal fraction strictly between 0 and 1, e.g.
+            0.02 = 2%. A whole-number percent such as 2 is rejected.
         take_profit: Take-profit as a decimal fraction, e.g. 0.03 = 3%.
         time_limit: Maximum position duration in SECONDS.
         trailing_stop_activation_price: Price delta at which the trailing stop arms.
@@ -810,7 +858,9 @@ async def create_position_executor(
         controller_id: Controller tag that owns the executor. Default 'main'. An
             autonomous agent MUST pass its own agent id here — it is what attributes
             the position to the session that opened it.
-        save_as_default: Save these arguments as the defaults for position executors.
+        save_as_default: Save this call's reusable settings (leverage, order types,
+            spreads, keep_position and the like) as defaults for position executors.
+            The pair, side, amounts, prices and time limit are never saved.
 
     Example:
     - Long 0.01 BTC at 5x with a 2% stop and 3% target:
@@ -907,6 +957,10 @@ async def create_grid_executor(
     means the entry is not confirmed. Tell the user a position is open only when the
     result (or `get_executor`) shows it running with volume filled.
 
+    SAVED DEFAULTS. An optional parameter you omit takes the user's saved default if
+    one exists (`executor_defaults` shows them), else the backend default named below.
+    The result lists every saved default that was applied.
+
     Args:
         connector_name: Exchange connector, e.g. 'binance_perpetual'.
         trading_pair: Trading pair, e.g. 'SOL-USDT'.
@@ -916,7 +970,8 @@ async def create_grid_executor(
         limit_price: Safety boundary that stops the grid. See DIRECTION RULES.
         total_amount_quote: Capital allocated, in QUOTE currency.
         take_profit: Distance for the opposite order on each fill, as a decimal
-            fraction, e.g. 0.0002 = 0.02%.
+            fraction, e.g. 0.0002 = 0.02%. REQUIRED unless a saved default supplies
+            it — there is no backend default, and the call is refused without one.
         time_limit: Maximum grid lifetime in SECONDS, after which the grid closes on
             its own — the dead-man switch an unattended run needs. OMIT for a grid
             that runs until `limit_price` or an explicit stop. e.g. 43200 = 12h.
@@ -943,7 +998,9 @@ async def create_grid_executor(
         account_name: Account to trade from. Default 'master_account'.
         controller_id: Controller tag that owns the executor. Default 'main'. An
             autonomous agent MUST pass its own agent id here.
-        save_as_default: Save these arguments as the defaults for grid executors.
+        save_as_default: Save this call's reusable settings (leverage, order types,
+            spreads, keep_position and the like) as defaults for grid executors.
+            The pair, side, amounts, prices and time limit are never saved.
 
     Example:
     - A $500 long grid on SOL-USDT between 140 and 150, stopping under 138:
@@ -1028,6 +1085,10 @@ async def create_dca_executor(
     means the entry is not confirmed. Tell the user a position is open only when the
     result (or `get_executor`) shows it running with volume filled.
 
+    SAVED DEFAULTS. An optional parameter you omit takes the user's saved default if
+    one exists (`executor_defaults` shows them), else the backend default named below.
+    The result lists every saved default that was applied.
+
     Args:
         connector_name: Exchange connector, e.g. 'binance_perpetual'.
         trading_pair: Trading pair, e.g. 'BTC-USDT'.
@@ -1036,7 +1097,8 @@ async def create_dca_executor(
         prices: Price for each level, same length as amounts_quote, e.g. [50000, 48000, 46000].
         leverage: Leverage multiplier. Backend default 1.
         take_profit: Take-profit as a decimal fraction, e.g. 0.03 = 3%.
-        stop_loss: Stop-loss as a decimal fraction, e.g. 0.05 = 5%.
+        stop_loss: Stop-loss as a decimal fraction strictly between 0 and 1, e.g.
+            0.05 = 5%. A whole-number percent such as 5 is rejected.
         time_limit: Maximum duration in SECONDS.
         trailing_stop_activation_price: Price delta at which the trailing stop arms.
             Only takes effect together with trailing_stop_trailing_delta.
@@ -1046,7 +1108,9 @@ async def create_dca_executor(
         account_name: Account to trade from. Default 'master_account'.
         controller_id: Controller tag that owns the executor. Default 'main'. An
             autonomous agent MUST pass its own agent id here.
-        save_as_default: Save these arguments as the defaults for DCA executors.
+        save_as_default: Save this call's reusable settings (leverage, order types,
+            spreads, keep_position and the like) as defaults for DCA executors.
+            The pair, side, amounts, prices and time limit are never saved.
 
     Example:
     - Ladder $350 into BTC across three levels with a 3% target and 5% stop:
@@ -1133,6 +1197,10 @@ async def create_order_executor(
     means the entry is not confirmed. Tell the user a position is open only when the
     result (or `get_executor`) shows it running with volume filled.
 
+    SAVED DEFAULTS. An optional parameter you omit takes the user's saved default if
+    one exists (`executor_defaults` shows them), else the backend default named below.
+    The result lists every saved default that was applied.
+
     Args:
         connector_name: Exchange connector, or a NETWORK id for a DEX swap (see above).
         trading_pair: Trading pair, e.g. 'SOL-USDC'. On a DEX either side may be a raw
@@ -1158,7 +1226,9 @@ async def create_order_executor(
         account_name: Account to trade from. Default 'master_account'.
         controller_id: Controller tag that owns the executor. Default 'main'. An
             autonomous agent MUST pass its own agent id here.
-        save_as_default: Save these arguments as the defaults for order executors.
+        save_as_default: Save this call's reusable settings (leverage, order types,
+            spreads, keep_position and the like) as defaults for order executors.
+            The pair, side, amounts, prices and time limit are never saved.
 
     Examples:
     - Market-buy $100 of SOL: create_order_executor("binance", "SOL-USDT", 1, "$100",
@@ -1247,6 +1317,10 @@ async def create_lp_executor(
     means the entry is not confirmed. Tell the user a position is open only when the
     result (or `get_executor`) shows it running with volume filled.
 
+    SAVED DEFAULTS. An optional parameter you omit takes the user's saved default if
+    one exists (`executor_defaults` shows them), else the backend default named below.
+    The result lists every saved default that was applied.
+
     Args:
         connector_name: The NETWORK, e.g. 'solana-mainnet-beta'. See above.
         lp_provider: DEX and trading type as 'dex/trading_type' — 'meteora/clmm',
@@ -1271,7 +1345,9 @@ async def create_lp_executor(
         account_name: Account to trade from. Default 'master_account'.
         controller_id: Controller tag that owns the executor. Default 'main'. An
             autonomous agent MUST pass its own agent id here.
-        save_as_default: Save these arguments as the defaults for LP executors.
+        save_as_default: Save this call's reusable settings (leverage, order types,
+            spreads, keep_position and the like) as defaults for LP executors.
+            The pair, side, amounts, prices and time limit are never saved.
 
     Example:
     - Single-sided 1 SOL into a BONK-SOL pool with a range below spot:
@@ -1687,7 +1763,8 @@ async def manage_gateway_config(
         pool_base: Base token symbol. Required to add a pool.
         pool_quote: Quote token symbol. Required to add a pool.
         pool_address: Pool contract address. Required to add a pool.
-        search: Filter tokens by symbol or name when listing.
+        search: Filter tokens by symbol or name when listing. An unfiltered token
+            list shows only its first 50 rows; a search shows every match.
         network: Bare network name ('mainnet-beta'). Required to list pools.
         chain: Filter wallets by chain when listing ('solana', 'ethereum').
     """
@@ -2285,11 +2362,6 @@ def _apply_cli_args():
     """
     import argparse
 
-    if username := os.getenv("HUMMINGBOT_API_USERNAME"):
-        settings.api_username = username
-    if password := os.getenv("HUMMINGBOT_API_PASSWORD"):
-        settings.api_password = password
-
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--url")
     parser.add_argument("--server-name")
@@ -2300,8 +2372,21 @@ def _apply_cli_args():
     parser.add_argument("--caller-id")
     args, _ = parser.parse_known_args()
 
+    username = os.getenv("HUMMINGBOT_API_USERNAME")
+    password = os.getenv("HUMMINGBOT_API_PASSWORD")
     if args.url:
+        # The spawner chose the server, so the credentials are the spawner's or
+        # nothing. Falling back to whatever ~/.hummingbot_mcp/server.yml holds
+        # would send ANOTHER server's username and password to this URL. An
+        # empty value fails authentication, which is the closed outcome.
         settings.api_url = args.url
+        settings.api_username = username or ""
+        settings.api_password = password or ""
+    else:
+        if username:
+            settings.api_username = username
+        if password:
+            settings.api_password = password
     if args.server_name:
         settings.server_name = args.server_name
     if args.agent_slug:

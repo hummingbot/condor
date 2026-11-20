@@ -323,9 +323,19 @@ def test_manage_agents_crud(tmp_path, monkeypatch):
     # The hint fell back to the description once the trigger was cleared.
     assert entry["when_to_consult"] == "watches drawdown"
 
-    assert ta.manage_agents(action="delete", agent_slug="risk_sentry") == {
-        "deleted": True
-    }
+    # Delete is the one action that is not local: it crosses to the main
+    # process, which holds the running-loop guard (MC-02). The route is stood
+    # in for here by the store call it makes.
+    from condor.agents.agent import AgentStore
+
+    async def fake_api(method, path, body=None, timeout=None):
+        assert (method, path) == ("DELETE", "/agents/risk_sentry")
+        return {"deleted": AgentStore().delete("risk_sentry")}
+
+    monkeypatch.setattr(ta, "call_main_api", fake_api)
+    assert asyncio.run(
+        ta.manage_agents_tool(action="delete", agent_slug="risk_sentry")
+    ) == {"deleted": True}
     assert "error" in ta.manage_agents(action="get", agent_slug="risk_sentry")
 
 

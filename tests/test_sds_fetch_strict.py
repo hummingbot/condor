@@ -270,3 +270,131 @@ def test_default_registrations_bind_strict_true():
         fetch_func = registry[data_type].fetch_func
         assert isinstance(fetch_func, partial), data_type
         assert fetch_func.keywords == {"strict": True}, data_type
+
+
+# --------------------------------------------------------------------------
+# DL-10: a read during an outage returns the stale value without re-fetching
+# --------------------------------------------------------------------------
+
+
+def test_get_or_fetch_fails_fast_inside_the_error_backoff_window():
+    """Each read of an expired key used to pay a full client timeout and then
+    return the cached value anyway."""
+    calls = {"count": 0}
+    failing = {"on": False}
+
+    async def fetcher(client, **params):
+        calls["count"] += 1
+        if failing["on"]:
+            raise RuntimeError("timed out")
+        return [POSITION]
+
+    sds = ServerDataService()
+
+    async def _fake_get_client(server_name):
+        return object()
+
+    sds._get_client = _fake_get_client
+    sds.register_fetch(ServerDataType.POSITIONS, fetcher)
+    key = CacheKey.make("srv", ServerDataType.POSITIONS)
+
+    async def _drive():
+        assert await sds.get_or_fetch("srv", ServerDataType.POSITIONS) == [POSITION]
+        assert calls["count"] == 1
+
+        # The value expires and the server starts failing.
+        failing["on"] = True
+        sds._cache[key].fetched_at -= 3600
+        assert await sds.get_or_fetch("srv", ServerDataType.POSITIONS) == [POSITION]
+        assert calls["count"] == 2
+        assert sds._cache[key].consecutive_errors == 1
+
+        # Still a blip: the first failures are each retried (review R7).
+        assert await sds.get_or_fetch("srv", ServerDataType.POSITIONS) == [POSITION]
+        assert await sds.get_or_fetch("srv", ServerDataType.POSITIONS) == [POSITION]
+        assert calls["count"] == 4
+        assert sds._cache[key].consecutive_errors == 3
+
+        # An outage now, and inside the backoff window: stale value, no request.
+        assert await sds.get_or_fetch("srv", ServerDataType.POSITIONS) == [POSITION]
+        assert calls["count"] == 4, "a read inside the backoff window re-fetched"
+
+        # Past the window the key is tried again, and recovers.
+        failing["on"] = False
+        sds._cache[key].last_error_at -= 60
+        assert await sds.get_or_fetch("srv", ServerDataType.POSITIONS) == [POSITION]
+        assert calls["count"] == 5
+        assert sds._cache[key].consecutive_errors == 0
+
+    asyncio.run(_drive())
+
+
+def test_a_single_failed_fetch_does_not_delay_the_read_after_recovery():
+    """Review R7: the stale fast path engaged from the FIRST error, so one
+    dropped request left reads on the old value until its backoff ran out even
+    though the server was answering again."""
+    from condor import server_data_service as sds_module
+
+    calls = {"count": 0}
+    failing = {"on": False}
+    value = {"now": [POSITION]}
+
+    async def fetcher(client, **params):
+        calls["count"] += 1
+        if failing["on"]:
+            raise RuntimeError("connection reset")
+        return value["now"]
+
+    sds = ServerDataService()
+
+    async def _fake_get_client(server_name):
+        return object()
+
+    sds._get_client = _fake_get_client
+    sds.register_fetch(ServerDataType.POSITIONS, fetcher)
+    key = CacheKey.make("srv", ServerDataType.POSITIONS)
+    fresh = [{**POSITION, "amount": "2"}]
+
+    async def _drive():
+        assert await sds.get_or_fetch("srv", ServerDataType.POSITIONS) == [POSITION]
+
+        failing["on"] = True
+        sds._cache[key].fetched_at -= 3600
+        assert await sds.get_or_fetch("srv", ServerDataType.POSITIONS) == [POSITION]
+        assert sds._cache[key].consecutive_errors == 1
+
+        # The server is back at once; the very next read must see it.
+        failing["on"] = False
+        value["now"] = fresh
+        assert await sds.get_or_fetch("srv", ServerDataType.POSITIONS) == fresh
+        assert calls["count"] == 3
+
+    asyncio.run(_drive())
+    # One threshold: a read gives up on a key exactly when the poller does.
+    assert sds_module._ERROR_BACKOFF_AFTER == 3
+
+
+def test_get_or_fetch_still_retries_a_key_that_never_had_a_value():
+    """Failing fast only ever returns a real value — never a cached "nothing"."""
+    calls = {"count": 0}
+
+    async def fetcher(client, **params):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("timed out")
+        return [POSITION]
+
+    sds = ServerDataService()
+
+    async def _fake_get_client(server_name):
+        return object()
+
+    sds._get_client = _fake_get_client
+    sds.register_fetch(ServerDataType.POSITIONS, fetcher)
+
+    async def _drive():
+        assert await sds.get_or_fetch("srv", ServerDataType.POSITIONS) is None
+        assert await sds.get_or_fetch("srv", ServerDataType.POSITIONS) == [POSITION]
+        assert calls["count"] == 2
+
+    asyncio.run(_drive())

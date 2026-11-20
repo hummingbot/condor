@@ -8,40 +8,11 @@ create/edit/delete. Mirrors ``tools/memory.py``.
 
 from condor.memory import SkillStore
 from mcp_servers.condor.settings import settings
+from mcp_servers.condor.tools._scope import ScopeError, UnknownAgent, resolve_target
 
-
-def _resolve_agent_slug(target: str | None) -> tuple[str | None, bool]:
-    """Resolve which assistant's skill library an action targets.
-
-    Mirrors routines' ``_get_agent_routines_dir``. ``target`` lets the chat
-    condor author/inspect a *specific* agent's local skills (the chat MCP has no
-    ``specialist_slug`` of its own). A skill library is keyed by the **agent**
-    alone, so a bare agent slug is the canonical form; a composite strategy key
-    ``"agent_slug.strategy_slug"`` is still accepted and resolves to its *owning
-    agent* (the strategy half is discarded — there is no per-strategy library).
-    Without a ``target`` the current assistant is used — the launched agent
-    (``settings.specialist_slug``) or the chat condor (``None``).
-
-    Returns ``(agent_slug, ok)``; ``ok`` is False only when a ``target`` was
-    given but matched no agent or strategy, so the caller errors instead of
-    silently writing to the chat library.
-    """
-    if target:
-        from condor.agents.agent import AgentStore
-
-        if AgentStore().get(target):
-            return target, True
-
-        # Legacy/convenience form: a composite strategy key. Skills live one
-        # level up, so this only serves to name the owning agent.
-        from condor.agents.strategy import StrategyStore
-
-        s = StrategyStore().get_by_key(target)
-        if s:
-            return s.agent_slug, True
-        return None, False
-
-    return (settings.specialist_slug or None), True
+# The actions that change a library. A bound specialist may not aim these at
+# another agent's (MC-07); the read actions stay open across agents.
+WRITE_ACTIONS = ("create", "edit", "delete", "write_file")
 
 
 async def manage_skill(
@@ -59,11 +30,20 @@ async def manage_skill(
     shared: bool | None = None,
 ) -> dict:
     # A skill library is keyed by agent, never by strategy — ``agent`` is the
-    # only target selector.
+    # only target selector. A bare agent slug is the canonical form; a composite
+    # loop key "agent_slug.loop_slug" resolves to its *owning agent*. Without
+    # one the current assistant is used — the launched agent, or the chat.
     target = agent
-    agent_slug, resolved = _resolve_agent_slug(target)
-    if target and not resolved:
+    try:
+        resolved = resolve_target(target, write=action in WRITE_ACTIONS, what="skills")
+    except UnknownAgent:
+        # Errors rather than silently writing to the chat library.
         return {"error": f"No agent or loop found for '{target}'"}
+    except ScopeError as exc:
+        return {"error": str(exc)}
+    # ``None`` is the chat's own library; a named target keeps its slug even
+    # when that slug is Condor's.
+    agent_slug = resolved if (target or settings.specialist_slug) else None
     store = SkillStore(agent_slug)
     source = f"agent:{agent_slug}" if agent_slug else "chat"
 

@@ -7,10 +7,11 @@ The routines pattern applied to a new kind of file. Local actions
 ``call_main_api`` — this subprocess holds no Hummingbot client — with
 ``server_name=settings.active_server``.
 
-Who may target what follows ``manage_routines``: ``agent=`` is honoured only for
-Condor (the chat onboarding a controller into an agent), ``shared=true`` only
-for Condor with no target, and an agent treats ``_shared`` controllers as
-read-only.
+Who may target what: ``agent=`` is honoured only for Condor (the chat onboarding
+a controller into an agent), ``shared=true`` only for Condor with no target, and
+an agent treats ``_shared`` controllers as read-only. The rule lives in
+``tools/_scope.py``, shared with ``manage_skill`` and ``manage_routines`` — which
+differ only in letting an agent *read* (and run) another agent's library.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ from condor.agent_controllers import (
 from mcp_servers.condor.condor_client import call_main_api
 from mcp_servers.condor.exceptions import APIError
 from mcp_servers.condor.settings import settings
+from mcp_servers.condor.tools._scope import ScopeError, resolve_target
 
 _NO_SERVER = (
     "No active server is selected for this session, so there is no server to "
@@ -51,29 +53,24 @@ def _target(agent: str | None, shared: bool | None) -> tuple[str, bool]:
     A bound specialist acts on itself; naming another agent is refused rather
     than silently ignored, and so is ``shared`` — an agent reads ``_shared`` but
     never writes it. Condor may target any agent, or the shared library.
-    """
-    from condor.memory.paths import CHAT_SLUG
 
-    own = settings.specialist_slug
-    if own:
-        if agent and agent != own:
-            raise ControllerError(
-                "an agent manages only its own controllers — omit `agent`"
-            )
+    The who-may-target-whom half is :func:`_scope.resolve_target`, shared with
+    ``manage_skill`` and ``manage_routines``. ``write=True`` for every action:
+    unlike those two, this tool does not let an agent read another's folder.
+    """
+    try:
+        slug = resolve_target(agent, write=True, what="controllers", loop_keys=False)
+    except ScopeError as exc:
+        raise ControllerError(str(exc)) from None
+
+    if settings.specialist_slug:
         if shared:
             raise ControllerError(
                 "_shared controllers are read-only to agents — write your own "
                 "under a new name instead"
             )
-        return own, False
-
-    if agent:
-        from condor.agents.agent import AgentStore
-
-        if AgentStore().get(agent) is None:
-            raise ControllerError(f"no agent named '{agent}'")
-        return agent, False
-    return CHAT_SLUG, bool(shared)
+        return slug, False
+    return slug, bool(shared) and not agent
 
 
 def list_controllers(slug: str) -> dict:

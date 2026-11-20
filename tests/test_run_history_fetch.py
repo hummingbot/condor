@@ -601,3 +601,26 @@ def test_an_archive_derived_run_is_cached_as_an_archive(monkeypatch):
     )
     entries = RunHistoryStore().list_entries()
     assert [e.source for e in entries] == ["archive"]
+
+
+def test_a_degraded_archive_curve_is_served_but_never_stored(monkeypatch):
+    """DL-06: the store is immutable, so an archive curve left in the run's own
+    currency (its quote could not be priced at that moment) must not be copied
+    into it — the next read gets another chance to convert."""
+    _with_archive(
+        monkeypatch,
+        ArchivePerf([(1_700_000_000, 5.0)], converted=False, pair="BTC-BRL"),
+    )
+    history = asyncio.run(
+        rh.fetch_run_history(
+            FakeClient({}),
+            "brigado",
+            bot_name="ancient",
+            deployed_at=iso(-1000),
+            stopped_at=iso(-900),
+            controller_ids=["c1"],
+            db_path="/a.sqlite",
+        )
+    )
+    assert history.source == "archive"
+    assert RunHistoryStore().list_entries() == []

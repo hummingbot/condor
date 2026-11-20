@@ -7,7 +7,7 @@ import { credentialsQuery, gatewayWalletsQuery } from "@/lib/queryClient";
 export function useCredentials() {
   const { server } = useServer();
 
-  const { data, isLoading: credsLoading } = useQuery({
+  const { data, isLoading: credsLoading, isError: credsError } = useQuery({
     ...credentialsQuery(server),
     queryFn: () => api.getCredentials(server!),
     enabled: !!server,
@@ -29,5 +29,12 @@ export function useCredentials() {
   const hasKeys = credentials.length > 0 || hasWallets;
   const isLoading = credsLoading || walletsLoading;
 
-  return { hasKeys, isLoading, credentials };
+  // "The credentials request failed and nothing is cached" is not "this user
+  // has no keys": the route raises when the Hummingbot API is unreachable, and
+  // reading that as an empty list covered every page with "Connect an Exchange"
+  // for a user who has keys (FU-02). With a cached answer the last known list
+  // still stands, so only the unknown case is reported.
+  const isError = credsError && data === undefined;
+
+  return { hasKeys, isLoading, isError, credentials };
 }

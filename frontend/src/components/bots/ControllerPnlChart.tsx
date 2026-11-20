@@ -12,6 +12,7 @@ import {
 import { aggregatePnlSeries, samplingIntervalSince } from "@/lib/pnl-chart";
 import { controllerPerfHistoryQuery } from "@/lib/queryClient";
 import type { ConvertFn } from "@/lib/rates";
+import { ChartState } from "@/components/charts/ChartState";
 import { PnlEvolutionChart } from "./PnlEvolutionChart";
 
 // ── Component ──
@@ -42,7 +43,7 @@ export function ControllerPnlChart({ server, controllerId, botName, deployedAt, 
   // finer interval until it remounts, and in exchange the query key is stable.
   const interval = useMemo(() => samplingIntervalSince(deployedAt), [deployedAt]);
 
-  const { data: raw, isLoading } = useQuery({
+  const { data: raw, isLoading, isError, refetch } = useQuery({
     // Built by the factory, not by hand: the shared socket routes live frames
     // into this entry by a prefix of the key, and the ordering that keeps that
     // working — bot before controller, interval last — is stated once on
@@ -111,22 +112,34 @@ export function ControllerPnlChart({ server, controllerId, botName, deployedAt, 
   );
 
   if (isLoading) {
+    return <ChartState kind="loading" message="Loading performance history..." height={height} className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]" />;
+  }
+
+  // A request that failed is not a controller with no history. Only when there
+  // is nothing to draw: a failed *refresh* keeps the series already on screen.
+  // Two ways to fail: the request rejects (Condor itself, a 4xx), or the route
+  // answers 200 with `server_online: false` because the trading server did not
+  // — which resolves the query, so `isError` alone read an outage as "no
+  // history".
+  const failed = isError || raw?.server_online === false;
+  if (failed && data.length === 0) {
     return (
-      <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] flex items-center justify-center" style={{ height }}>
-        <div className="flex items-center gap-2 text-xs text-[var(--color-text-muted)]">
-          <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
-          Loading performance history...
-        </div>
-      </div>
+      <ChartState
+        kind="error"
+        message={
+          raw?.server_online === false && raw.error_hint
+            ? `Could not load this controller's performance history — ${raw.error_hint}`
+            : "Could not load this controller's performance history"
+        }
+        onRetry={() => void refetch()}
+        height={height}
+        className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]"
+      />
     );
   }
 
   if (data.length === 0) {
-    return (
-      <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] flex items-center justify-center" style={{ height }}>
-        <p className="text-xs text-[var(--color-text-muted)]">No performance history available</p>
-      </div>
-    );
+    return <ChartState kind="empty" message="No performance history available" height={height} className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]" />;
   }
 
   const pnlH = Math.round(height * 0.65);

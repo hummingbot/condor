@@ -10,7 +10,7 @@ import { useSearchParams } from "react-router-dom";
 
 import { InlineConfirm } from "@/components/ui/InlineConfirm";
 import { useIsAdmin } from "@/hooks/useIsAdmin";
-import { useServer } from "@/hooks/useServer";
+import { fallbackServer, useServer } from "@/hooks/useServer";
 import { type ServerInfo, api } from "@/lib/api";
 
 interface ServerForm {
@@ -74,7 +74,16 @@ export function ServersSettings() {
 
   const deleteMut = useMutation({
     mutationFn: (name: string) => api.deleteServer(name),
-    onSuccess: () => { invalidate(); setConfirmDelete(null); },
+    onSuccess: (_data, name) => {
+      // Deleting the server this browser is on must move the selection with
+      // it: left alone, every page keeps querying a name that no longer
+      // exists (FU-09). Picked from the list as it stood, minus the one gone.
+      if (name === activeServer) {
+        setServer(fallbackServer(servers.filter((s) => s.name !== name)));
+      }
+      invalidate();
+      setConfirmDelete(null);
+    },
   });
 
   // Setting the default is two things at once, because the button reads as one:

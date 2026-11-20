@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections import Counter, OrderedDict
 from functools import partial
@@ -1095,24 +1096,52 @@ def _drop_dead_readings(
     return out
 
 
+def unpriced_quotes(
+    by_controller: dict[str, ControllerSeries],
+    usd_rates: Mapping[str, float] | None,
+) -> set[str]:
+    """Quotes ``by_controller`` reports in that ``usd_rates`` could not price.
+
+    Empty when no conversion was asked for (``usd_rates is None``). These are
+    the controllers :func:`merge_controller_series` leaves out of the money.
+    """
+    if usd_rates is None:
+        return set()
+    return {q for q, _ in by_controller.values() if q and q not in usd_rates}
+
+
 def merge_controller_series(
     by_controller: dict[str, ControllerSeries],
     usd_rates: Mapping[str, float] | None = None,
 ) -> list[tuple[float, float, float, float, float]]:
     """Forward-carry every controller's cumulative and sum them per instant.
 
-    With ``usd_rates``, each controller's realized, volume and fees are first
-    multiplied by its own quote's rate — a controller that never named a pair
-    takes a sibling's quote, and an unpriced quote stays at face value. Without
-    it the sum is in the controllers' quote currencies, which is only meaningful
-    when they share one.
+    With ``usd_rates`` (an empty mapping included — that is a lookup which
+    priced nothing, not a request for face value), each controller's realized,
+    volume and fees are first multiplied by its own quote's rate; a controller
+    that never named a pair takes a sibling's quote. A controller whose quote
+    is *known* and absent from ``usd_rates`` contributes no money at all: the
+    mapping only ever holds a quote it resolved, and folding native money in
+    at 1.0 is how a BRL bot's history read five times too large while the
+    snapshot path (:func:`restate_universe_in_usd`) excluded the very same
+    controller. Its trade count is still summed — counts are not money. A
+    controller with no quote to go on, its own or a sibling's, stays at face
+    value: nothing says it is not USD.
+
+    With ``usd_rates=None`` the sum is in the controllers' quote currencies,
+    which is only meaningful when they share one.
     """
     if not by_controller:
         return []
 
     sibling = next((q for q, _ in by_controller.values() if q), "")
+    unpriced = unpriced_quotes(by_controller, usd_rates)
     rate = {
-        cid: (usd_rates.get(q or sibling, 1.0) if usd_rates else 1.0)
+        cid: (
+            1.0
+            if usd_rates is None
+            else 0.0 if (q or sibling) in unpriced else usd_rates.get(q or sibling, 1.0)
+        )
         for cid, (q, _) in by_controller.items()
     }
     series = {cid: samples for cid, (_, samples) in by_controller.items()}
@@ -1299,6 +1328,53 @@ MAX_HISTORY_INSTANCES = 24
 MAX_CONCURRENT_HISTORY_FETCHES = 10
 
 
+_DEPLOY_SUFFIX = re.compile(r"-(\d{8}-\d{6})$")
+
+
+def _instance_recency(name: str, all_bot_perf: dict[str, dict]) -> str:
+    """Sortable ``YYYYMMDD-HHMMSS`` stamp of how recent an instance is.
+
+    The deploy suffix when the name carries one — the only signal an archived
+    instance has — else the instance's latest snapshot time, else ``""``
+    (oldest).
+    """
+    match = _DEPLOY_SUFFIX.search(name)
+    if match:
+        return match.group(1)
+    epoch = _iso_to_epoch(all_bot_perf.get(name, {}).get("timestamp"))
+    if epoch is None:
+        return ""
+    return time.strftime("%Y%m%d-%H%M%S", time.gmtime(epoch))
+
+
+def cap_history_instances(
+    instances: Iterable[str],
+    all_bot_perf: dict[str, dict],
+    live: set[str] | None = None,
+) -> list[str]:
+    """At most ``MAX_HISTORY_INSTANCES`` of ``instances``, chosen by recency.
+
+    Sorting the names and keeping the tail is chronological only *within* one
+    base: across bases it is alphabetical, so a strategy with several bases and
+    many redeploys dropped every instance of its alphabetically-first base —
+    the running one included — and reported $0 realized for it. Running
+    instances (``live``, when the orchestrator answered) are always kept, over
+    the cap if need be; the remaining slots go to the most recently deployed.
+    Returned in name order.
+    """
+    names = sorted(set(instances))
+    if len(names) <= MAX_HISTORY_INSTANCES:
+        return names
+    keep = {n for n in names if live and n in live}
+    rest = sorted(
+        (n for n in names if n not in keep),
+        key=lambda n: (_instance_recency(n, all_bot_perf), n),
+        reverse=True,
+    )
+    keep.update(rest[: max(0, MAX_HISTORY_INSTANCES - len(keep))])
+    return sorted(keep)
+
+
 async def fetch_instance_histories(
     client: Any,
     all_bot_perf: dict[str, dict],
@@ -1325,13 +1401,16 @@ async def fetch_instance_histories(
     instances_by_base = partition_instances(all_bot_perf, bases, extra_names)
     all_instances = sorted({i for lst in instances_by_base.values() for i in lst})
     if len(all_instances) > MAX_HISTORY_INSTANCES:
-        logger.warning(
-            "bot history: %d instances, capping at %d newest "
-            "(older sessions may under-report)",
-            len(all_instances),
-            MAX_HISTORY_INSTANCES,
+        kept = cap_history_instances(
+            all_instances, all_bot_perf, await fetch_live_instance_names(client)
         )
-        all_instances = all_instances[-MAX_HISTORY_INSTANCES:]
+        logger.warning(
+            "bot history: %d instances, keeping %d (running ones, then the "
+            "most recently deployed; older sessions may under-report)",
+            len(all_instances),
+            len(kept),
+        )
+        all_instances = kept
 
     # A zero/absent takeover instant means "unknown", not "epoch 0" — spanning
     # back to 1970 would coarsen every bot to daily buckets. Cap the span at what
@@ -1384,6 +1463,15 @@ async def fetch_instance_histories(
     rates = await resolve_client_usd_rates(
         client, {q for s in series.values() for q, _ in s.values() if q}
     )
+    for inst, s in series.items():
+        missing = unpriced_quotes(s, rates.rates)
+        if missing:
+            logger.warning(
+                "No USD rate for quote %s (bot %s); excluding its controllers "
+                "from the USD history",
+                ", ".join(sorted(missing)),
+                inst,
+            )
     history = {
         inst: merge_controller_series(s, rates.rates) for inst, s in series.items()
     }

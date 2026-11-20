@@ -131,6 +131,28 @@ async def get_current_user(
 # ── Role gates ──
 
 
+def is_active_user(user_id: int) -> bool:
+    """True while ``user_id`` still holds a role that may use the dashboard.
+
+    The per-action gate for the two WebSockets. A socket authenticates once,
+    at the handshake, and then lives for hours: without this, blocking or
+    demoting a user stopped their REST calls on the next request
+    (``get_current_user``) but left an already-open tab subscribing to
+    channels and prompting agents that hold trading tools. The role is re-read
+    from the ConfigManager — an in-memory lookup — and never trusted from the
+    JWT claim. Fails closed.
+    """
+    # Resolved at call time, as the sockets' own connect checks do.
+    from config_manager import get_config_manager as current_config_manager
+
+    try:
+        role = current_config_manager().get_user_role(user_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("Role lookup failed for user %s; denying", user_id)
+        return False
+    return role in (UserRole.USER, UserRole.ADMIN)
+
+
 def require_admin(user: WebUser) -> None:
     """Refuse anyone who is not a Condor admin.
 

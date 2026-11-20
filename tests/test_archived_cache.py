@@ -160,3 +160,71 @@ def test_cached_response_identical_to_fresh():
     )
     assert refetched.model_dump() == fresh.model_dump()
     _reset_caches()
+
+
+# ── DL-06: a degraded result is not pinned for the life of the process ──
+
+
+class _Rates:
+    """``resolve_usd_rates`` stand-in that cannot price the quote at first."""
+
+    def __init__(self, failures: int):
+        self.failures = failures
+
+    async def __call__(self, server, quotes):
+        from condor.quote_conversion import QuoteRates
+
+        if self.failures > 0:
+            self.failures -= 1
+            return QuoteRates({}, False)
+        return QuoteRates({q: 1.0 for q in quotes}, True)
+
+
+def test_an_unconverted_result_expires_and_the_next_read_converts(monkeypatch):
+    """One failed rate lookup on first open used to pin ``converted=False``
+    figures under the no-TTL key until Condor restarted."""
+    import condor.quote_conversion as qc
+
+    _reset_caches()
+    monkeypatch.setattr(qc, "resolve_usd_rates", _Rates(failures=1))
+    client = FakeClient()
+
+    first = asyncio.run(archived.fetch_archived_run(client, "srv", "db.sqlite"))
+    assert first.converted is False
+    assert archived.run_is_degraded("srv", "db.sqlite")
+
+    # Inside the short TTL the page's follow-up requests share the one walk.
+    assert archived.cached_run("srv", "db.sqlite") is first
+    assert client.archived_bots.summary_calls == 1
+
+    # Past it the entry is gone and the run is read again — converted this time.
+    key = ("srv", "db.sqlite")
+    archived._degraded_until[key] -= archived._DEGRADED_TTL + 1
+    assert archived.cached_run("srv", "db.sqlite") is None
+    second = asyncio.run(archived.fetch_archived_run(client, "srv", "db.sqlite"))
+    assert second.converted is True
+    assert client.archived_bots.summary_calls == 2
+
+    # A complete result is kept for good, as before.
+    assert not archived.run_is_degraded("srv", "db.sqlite")
+    assert archived._degraded_until == {}
+    assert (
+        asyncio.run(archived.fetch_archived_run(client, "srv", "db.sqlite")) is second
+    )
+    assert client.archived_bots.summary_calls == 2
+    _reset_caches()
+
+
+def test_a_failed_executor_fetch_marks_the_result_degraded():
+    _reset_caches()
+    client = FakeClient()
+
+    async def boom(db_path):
+        raise RuntimeError("502 Bad Gateway")
+
+    client.archived_bots.get_database_executors = boom
+    perf = asyncio.run(archived.fetch_archived_run(client, "srv", "db.sqlite"))
+
+    assert perf.executors == []
+    assert archived.run_is_degraded("srv", "db.sqlite")
+    _reset_caches()

@@ -60,11 +60,19 @@ export interface SessionOptions {
   defaultAgent: string;
 }
 
+/**
+ * The lists `/sessions/options` may leave out, one identity each: a `?? []`
+ * fallback is a fresh array per render, and these are forwarded to every
+ * memoised message in the transcript (FU-04).
+ */
+const NO_CUSTOM_PROVIDERS: CustomProvider[] = [];
+const NO_AGENT_BINDINGS: AgentBindingOption[] = [];
+
 /** What the picker falls back to when `/sessions/options` cannot be read. */
 const FALLBACK: SessionOptions = {
   agents: [{ key: "claude-code", label: "Claude Code" }],
-  customProviders: [],
-  agentBindings: [],
+  customProviders: NO_CUSTOM_PROVIDERS,
+  agentBindings: NO_AGENT_BINDINGS,
   defaultAgent: "claude-code",
 };
 
@@ -88,8 +96,8 @@ export function useSessionOptions(enabled = true): SessionOptions {
   if (!data) return FALLBACK;
   return {
     agents: data.agents,
-    customProviders: data.custom_providers ?? [],
-    agentBindings: data.agent_bindings ?? [],
+    customProviders: data.custom_providers ?? NO_CUSTOM_PROVIDERS,
+    agentBindings: data.agent_bindings ?? NO_AGENT_BINDINGS,
     defaultAgent: data.default_agent,
   };
 }

@@ -204,6 +204,7 @@ def test_xrpl_in_both_lists_keeps_its_hummingbot_market_data():
         "name": "xrpl",
         "hummingbot_market_data": True,
         "clmm_lp": False,
+        "gecko_candles": True,
         "credentialed": True,
     }
     # And the real gateway network in the same answer is unaffected.
@@ -211,6 +212,7 @@ def test_xrpl_in_both_lists_keeps_its_hummingbot_market_data():
         "name": "solana-mainnet-beta",
         "hummingbot_market_data": False,
         "clmm_lp": True,
+        "gecko_candles": True,
         "credentialed": True,
     }
 
@@ -244,6 +246,7 @@ def test_a_credentialed_connector_has_market_data_and_no_lp():
         "name": "binance",
         "hummingbot_market_data": True,
         "clmm_lp": False,
+        "gecko_candles": False,
         "credentialed": True,
     }
     assert venues["binance_perpetual"]["hummingbot_market_data"] is True
@@ -255,6 +258,7 @@ def test_a_gateway_network_has_lp_and_no_market_data():
         "name": "solana-mainnet-beta",
         "hummingbot_market_data": False,
         "clmm_lp": True,
+        "gecko_candles": True,
         "credentialed": True,
     }
 
@@ -266,6 +270,7 @@ def test_a_gateway_network_with_no_clmm_venue_gets_no_lp():
         "name": "avalanche",
         "hummingbot_market_data": False,
         "clmm_lp": False,
+        "gecko_candles": True,
         "credentialed": True,
     }
 
@@ -300,6 +305,7 @@ def test_a_candle_only_venue_is_chartable_but_not_credentialed():
         "name": "binance",
         "hummingbot_market_data": True,
         "clmm_lp": False,
+        "gecko_candles": False,
         "credentialed": False,
     }
     assert venues["okx"]["hummingbot_market_data"] is True
@@ -332,6 +338,7 @@ def test_a_gateway_network_in_the_candle_list_keeps_its_traits():
         "name": "solana-mainnet-beta",
         "hummingbot_market_data": True,
         "clmm_lp": True,
+        "gecko_candles": True,
         "credentialed": True,
     }
 
@@ -669,18 +676,21 @@ def test_route_returns_the_venues(monkeypatch):
             "name": "binance",
             "hummingbot_market_data": True,
             "clmm_lp": False,
+            "gecko_candles": False,
             "credentialed": True,
         },
         {
             "name": "kraken",
             "hummingbot_market_data": True,
             "clmm_lp": False,
+            "gecko_candles": False,
             "credentialed": False,
         },
         {
             "name": "solana-mainnet-beta",
             "hummingbot_market_data": False,
             "clmm_lp": True,
+            "gecko_candles": True,
             "credentialed": True,
         },
     ]

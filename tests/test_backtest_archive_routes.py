@@ -126,7 +126,10 @@ def test_the_task_list_stays_far_under_the_wire_budget(store):
 
 
 def test_a_run_from_another_server_opens_without_switching_the_sidebar(store):
-    task = asyncio.run(bt_routes.get_archived_backtest("task-brigado", user=ALICE))
+    # The route answers finished JSON bytes, not a dict (XC-03).
+    task = json.loads(
+        asyncio.run(bt_routes.get_archived_backtest("task-brigado", user=ALICE)).body
+    )
 
     assert task["task_id"] == "task-brigado"
     assert task["result"]["results"]["net_pnl_quote"] == 2.0

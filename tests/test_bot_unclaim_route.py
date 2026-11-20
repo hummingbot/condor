@@ -101,6 +101,7 @@ def test_a_running_loop_does_not_write_the_claim_back(strategy, client, monkeypa
     assert live.bases() == [BOT], "the running loop starts holding the claim"
 
     class FakeEngine:
+        user_id = USER.id
         ledger = live
         session_dir = _sessions(strategy) / "session_1"
 
@@ -180,3 +181,76 @@ def test_a_claim_without_a_session_goes_to_the_newest_run_after_an_unclaim(
     assert res.status_code == 200
     assert BotLedger(NS, _sessions(strategy) / "session_10").bases() == [BOT]
     assert BotLedger(NS, _sessions(strategy) / "session_9").bases() == []
+
+
+# ── WR-01: the gates every other strategy writer already has ──
+
+
+def _foreign_engine(strategy, live):
+    class FakeEngine:
+        user_id = 999  # somebody else started this loop
+        ledger = live
+        session_dir = _sessions(strategy) / "session_1"
+
+    return FakeEngine()
+
+
+@pytest.mark.parametrize("verb", ["claim-bot", "unclaim-bot"])
+def test_another_users_live_run_refuses_the_repair(strategy, client, monkeypatch, verb):
+    """Neither route may patch the ledger of a loop somebody else is running."""
+    _claimed(strategy, "session_1")
+    path = _sessions(strategy) / "session_1" / "owned_bots.json"
+    before = path.read_text()
+    live = BotLedger(NS, _sessions(strategy) / "session_1", enforced=False)
+    monkeypatch.setattr(
+        routes, "_get_engines_for", lambda *a: [_foreign_engine(strategy, live)]
+    )
+
+    res = client.post(
+        f"/agents/brigado/strategies/pmm_king/{verb}",
+        json={"bot_name": "some-other-bot" if verb == "claim-bot" else BOT},
+    )
+
+    assert res.status_code == 403
+    assert path.read_text() == before, "nothing written on disk"
+    assert live.bases() == [BOT], "nor in the running loop's memory"
+    assert read_disowned(strategy.home) == set()
+
+
+@pytest.mark.parametrize("verb", ["claim-bot", "unclaim-bot"])
+def test_a_server_the_caller_cannot_reach_refuses_the_repair(
+    strategy, client, monkeypatch, verb
+):
+    _claimed(strategy, "session_1")
+    path = _sessions(strategy) / "session_1" / "owned_bots.json"
+    before = path.read_text()
+    monkeypatch.setattr(routes, "_strategy_server", lambda *a, **k: "their_server")
+    monkeypatch.setattr(routes, "_may_use_strategy_server", lambda *a: False)
+
+    res = client.post(
+        f"/agents/brigado/strategies/pmm_king/{verb}", json={"bot_name": BOT}
+    )
+
+    assert res.status_code == 403
+    assert path.read_text() == before
+    assert read_disowned(strategy.home) == set()
+
+
+def test_a_claim_does_not_rewrite_an_enforced_session_as_unenforced(strategy, client):
+    """``enforced`` is the session's own statement of its mode, not the claim's."""
+    import json
+
+    session = _sessions(strategy) / "session_1"
+    BotLedger(NS, session, enforced=True).note_deploy(f"{NS}-own")
+    assert json.loads((session / "owned_bots.json").read_text())["enforced"] is True
+
+    res = client.post(
+        "/agents/brigado/strategies/pmm_king/claim-bot",
+        json={"bot_name": BOT, "since": 1000.0},
+    )
+
+    assert res.status_code == 200
+    data = json.loads((session / "owned_bots.json").read_text())
+    assert data["enforced"] is True
+    # The out-of-namespace intent still survives a reopen, through ``declared``.
+    assert BotLedger(NS, session).owns(BOT)

@@ -81,7 +81,7 @@ def _grid(client, **overrides):
 def test_the_lifetime_reaches_the_backend_under_the_triple_barrier():
     client = _Client()
 
-    _grid(client, time_limit=TWELVE_HOURS)
+    _grid(client, take_profit=0.002, time_limit=TWELVE_HOURS)
 
     assert client.creates[0]["triple_barrier_config"]["time_limit"] == TWELVE_HOURS
 

@@ -6,6 +6,7 @@ import {
   useState,
 } from "react";
 
+import { setOnUnauthorized } from "./api";
 import { TOKEN_KEY, authHeaders } from "./auth-token";
 import { clearDiagnostics } from "./diagnostics";
 import { queryClient } from "./queryClient";
@@ -70,6 +71,79 @@ function resetForNewUser(incoming: User) {
   queryClient.clear();
   clearDiagnostics();
   clearSessionState();
+}
+
+/**
+ * Decide what a 401 means for the stored session, and act on it (FD-01).
+ *
+ * `/auth/me` is the authority: a 401 from any other route can be about
+ * something else — the hub routes pass Botcamp's own 401 through — and only a
+ * session `/auth/me` itself refuses is over. Anything else it answers (a 502
+ * from the proxy while Condor restarts, a network error) says nothing about
+ * the token, and logging out on it would wipe the saved order sizes, leverage
+ * and routine configs for a session that is still good.
+ *
+ * A dead session in local mode is claimed again rather than ended: there is no
+ * login step to send the user back to. Resolves `true` only then, so the
+ * caller knows a retry will carry a live token.
+ */
+export async function resolveUnauthorized(actions: {
+  loginLocal: () => Promise<void>;
+  logout: () => void;
+}): Promise<boolean> {
+  let status: number;
+  try {
+    status = await probe("/api/v1/auth/me", { headers: authHeaders() }, (res) => res.status);
+  } catch {
+    // server not available (or too slow to say), keep token
+    return false;
+  }
+  if (status !== 401 && status !== 403) return false;
+  try {
+    const mode = await probe("/api/v1/auth/mode", {}, async (res) =>
+      res.ok ? ((await res.json()) as { mode?: string } | null)?.mode : undefined,
+    );
+    if (mode === "local") {
+      await actions.loginLocal();
+      return true;
+    }
+  } catch {
+    // Mode unknown or the local login failed: the session is still dead.
+  }
+  actions.logout();
+  return false;
+}
+
+/**
+ * How long one session probe may take before it counts as unanswered.
+ *
+ * Every request that 401s waits on this check (FD-01) after its own deadline
+ * was already cleared (FD-05), so a `/auth/me` that never answers would hang
+ * that request — and every later 401 joined to the same check — forever. An
+ * unanswered probe is treated like an unreachable server: the session is kept.
+ */
+export const AUTH_PROBE_TIMEOUT_MS = 10_000;
+
+/**
+ * One bounded auth request, body read included.
+ *
+ * Plain `fetch` on purpose, never `apiFetch`: these are the requests that
+ * decide what a 401 means, so they must not report a 401 back into the
+ * handler that is running them. (They are `/auth/` routes too, which
+ * `apiFetch` would not report anyway — this does not lean on that.)
+ */
+async function probe<T>(
+  path: string,
+  init: RequestInit,
+  read: (res: Response) => T | Promise<T>,
+): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AUTH_PROBE_TIMEOUT_MS);
+  try {
+    return await read(await fetch(path, { ...init, signal: controller.signal }));
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export const AuthContext = createContext<AuthState>({
@@ -156,16 +230,16 @@ export function useAuthState(): AuthState {
   // Validate token on mount
   useEffect(() => {
     if (!token) return;
-    fetch("/api/v1/auth/me", {
-      headers: authHeaders(),
-    }).then((res) => {
-      if (!res.ok) {
-        logout();
-      }
-    }).catch(() => {
-      // server not available, keep token
-    });
+    void resolveUnauthorized({ loginLocal, logout });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ...and whenever a request made with it is refused later: a tab left open
+  // past the token's lifetime otherwise keeps yesterday's numbers on screen
+  // while every request behind them fails.
+  useEffect(
+    () => setOnUnauthorized(() => resolveUnauthorized({ loginLocal, logout })),
+    [loginLocal, logout],
+  );
 
   return {
     user,
