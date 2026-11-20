@@ -879,6 +879,11 @@ def _journal_cleanup_refusals(engine: Any) -> None:
         )
 
 
+# The "shutdown STARTED" notices still in flight. asyncio keeps only a weak
+# reference to a task, so one nobody holds can be collected before it sends.
+_START_NOTICES: set[asyncio.Task] = set()
+
+
 async def run_shutdown(engine: Any, reason: str) -> None:
     """Wind down this session's executors/positions per its ``shutdown.md`` policy.
 
@@ -921,10 +926,25 @@ async def run_shutdown(engine: Any, reason: str) -> None:
     # after the kill switch fired; until then nothing said the session was
     # being wound down. The final, verified message still follows. Not 🚨:
     # that mark is kept for a winddown that failed or could not be verified.
-    await engine._notify(
-        f"⚠️ Agent {agent_id}: emergency shutdown STARTED — {reason}. Winding "
-        f"down per '{policy.on_kill_switch}'; a final report follows."
+    #
+    # Sent from a task, never awaited here: a Telegram send can take its whole
+    # connect + read timeout (about 40s) to fail, and awaited inline that is 40s
+    # of an open book before the first executor is stopped -- during the
+    # drawdown that fired the kill switch. The winddown starts now; the notice
+    # lands when it lands.
+    start_notice = asyncio.create_task(
+        engine._notify(
+            f"⚠️ Agent {agent_id}: emergency shutdown STARTED — {reason}. Winding "
+            f"down per '{policy.on_kill_switch}'; a final report follows."
+        )
     )
+    _START_NOTICES.add(start_notice)
+    start_notice.add_done_callback(_START_NOTICES.discard)
+
+    async def notify_outcome(text: str) -> None:
+        """The closing notice, after the opening one so they arrive in order."""
+        await asyncio.gather(start_notice, return_exceptions=True)
+        await engine._notify(text)
 
     client = await engine._get_client()
     if client is None:
@@ -933,7 +953,7 @@ async def run_shutdown(engine: Any, reason: str) -> None:
             f"positions may be OPEN, check manually! ({reason})"
         )
         log.error(msg)
-        await engine._notify(msg)
+        await notify_outcome(msg)
         if engine.journal:
             with engine.journal.batch():
                 engine.journal.append_action(
@@ -1005,7 +1025,7 @@ async def run_shutdown(engine: Any, reason: str) -> None:
         msg += f"\n⚠️ {len(failures)} winddown error(s): " + "; ".join(failures[:5])
     if cancel.failed or cancel.unattributed or cancel.unsupported or cancel.unknown:
         msg += f"\n⚠️ {cancel.describe()}"
-    await engine._notify(msg)
+    await notify_outcome(msg)
 
     if engine.journal:
         if stranded is None:

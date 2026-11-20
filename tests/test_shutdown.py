@@ -307,26 +307,43 @@ def test_winddown_no_client_alerts_loudly(tmp_path, monkeypatch):
 
 
 def test_the_owner_is_told_when_the_winddown_starts(tmp_path, monkeypatch):
-    """AG1-07: the first message goes out before any stop, the last is the
+    """AG1-07: the first message says the winddown started, the last is the
     verified outcome -- the owner is not left silent for the whole winddown."""
     running = [{"id": "e_perp", "connector": "binance_perpetual"}]
     engine, client, notes = _fake_engine(running, [[]], monkeypatch, tmp_path)
-    stops_at_first_notice: list[int] = []
-    record = engine._notify
-
-    async def _notify(msg):
-        if not notes:
-            stops_at_first_notice.append(len(client.executors.stop_calls))
-        await record(msg)
-
-    engine._notify = _notify
     asyncio.run(run_shutdown(engine, "drawdown 12% > 10%"))
 
     assert len(notes) == 2
     assert "STARTED" in notes[0] and "drawdown 12% > 10%" in notes[0]
     assert "keep_spot_close_perp" in notes[0]
-    assert stops_at_first_notice == [0], "announced before the first stop"
     assert "✅" in notes[1] and "complete" in notes[1]
+
+
+def test_a_slow_start_notice_does_not_hold_the_winddown(tmp_path, monkeypatch):
+    """The start notice is sent beside the winddown, never ahead of it.
+
+    A Telegram send that hangs takes its whole timeout to fail. Awaited before
+    the first stop, that was ~40s of an open book during the drawdown that
+    fired the kill switch. Here the notice cannot finish until the stop has
+    happened -- an inline await would deadlock, and the timeout would fail it.
+    """
+    running = [{"id": "e_perp", "connector": "binance_perpetual"}]
+    engine, client, notes = _fake_engine(running, [[]], monkeypatch, tmp_path)
+    stops_when_start_notice_landed: list[int] = []
+
+    async def _notify(msg):
+        if "STARTED" in msg:
+            while not client.executors.stop_calls:
+                await asyncio.sleep(0.001)
+            stops_when_start_notice_landed.append(len(client.executors.stop_calls))
+        notes.append(msg)
+
+    engine._notify = _notify
+    asyncio.run(asyncio.wait_for(run_shutdown(engine, "breach"), timeout=5))
+
+    assert stops_when_start_notice_landed and stops_when_start_notice_landed[0] >= 1
+    # Still in order: the outcome waits for the start notice, not the stops.
+    assert "STARTED" in notes[0] and "complete" in notes[-1]
 
 
 def test_a_winddown_with_no_client_still_announces_its_start(tmp_path, monkeypatch):
