@@ -46,7 +46,8 @@ and the open PnL in ATR when a position is open) and one of:
   `NACE_API_KEY`, or the request failed). Apply the rule yourself.
 - `Drex was not asked:` the book is neither empty nor one filled position
   executor of this side on this connector and pair (an order still filling, a
-  second executor, another market). Read the executors and decide yourself.
+  second executor, another market, a position held or still closing, or a book
+  the venue check does not trust). Read the executors and decide yourself.
 
 On a Drex HOLD the engine journals the answer and skips your turn (a dry run
 shows it to you instead). The position's own stop-loss is what protects it

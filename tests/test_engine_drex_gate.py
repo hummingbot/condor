@@ -32,7 +32,7 @@ POSITION = {
 }
 
 
-def _engine(tmp_path, monkeypatch, executors, **config):
+def _engine(tmp_path, monkeypatch, executors, held=(), **config):
     from condor.agents.agent import Agent
     from condor.agents.engine import TickEngine
     from condor.agents.strategy import Strategy
@@ -54,7 +54,11 @@ def _engine(tmp_path, monkeypatch, executors, **config):
 
     async def providers(*_args, **_kwargs):
         data = {"executors": executors} if isinstance(executors, list) else executors
-        return {"executors": ProviderResult(name="executors", data=data, summary="")}
+        positions = held if isinstance(held, dict) else {"positions": list(held)}
+        return {
+            "executors": ProviderResult(name="executors", data=data, summary=""),
+            "positions": ProviderResult(name="positions", data=positions, summary=""),
+        }
 
     monkeypatch.setattr(engine, "_adopt_running_bots", no_adoption)
     monkeypatch.setattr(engine.provider_registry, "run_core_providers", providers)
@@ -221,6 +225,8 @@ def test_the_loop_s_own_rule_is_what_drex_and_the_model_get(tmp_path, monkeypatc
         [{**POSITION, "volume": 0.0, "entry_price": 0.0}],
         [POSITION] * 2,
         {"error": "backend unreachable"},
+        {"executors": [], "all_executors": [{**POSITION, "status": "SHUTTING_DOWN"}]},
+        {"executors": [], "unpriced_exposure": ["ex-1"]},
     ],
     ids=[
         "other pair",
@@ -231,6 +237,8 @@ def test_the_loop_s_own_rule_is_what_drex_and_the_model_get(tmp_path, monkeypatc
         "pending market order",
         "two positions",
         "no reading",
+        "position still closing",
+        "book untrusted",
     ],
 )
 def test_a_book_the_question_does_not_describe_is_left_to_the_model(
@@ -239,6 +247,25 @@ def test_a_book_the_question_does_not_describe_is_left_to_the_model(
     monkeypatch.setenv("NACE_API_KEY", "nace_sk_test")
     calls = _drex(monkeypatch, "hold", {"hold": 1.0, "start": 0.0})
     engine = _engine(tmp_path, monkeypatch, executors, **GATE)
+
+    ctx = asyncio.run(engine._gather_tick_context(_client()))
+
+    assert calls == []
+    assert "Drex was not asked" in ctx.prompt
+
+
+@pytest.mark.parametrize(
+    "held",
+    [
+        [{"trading_pair": "BTC-USDT", "position_side": "LONG", "net_amount_base": 1}],
+        {"error": "backend unreachable"},
+    ],
+    ids=["position held after its executor stopped", "no positions reading"],
+)
+def test_a_held_position_is_left_to_the_model(tmp_path, monkeypatch, held):
+    monkeypatch.setenv("NACE_API_KEY", "nace_sk_test")
+    calls = _drex(monkeypatch, "hold", {"hold": 1.0, "start": 0.0})
+    engine = _engine(tmp_path, monkeypatch, [], held=held, **GATE)
 
     ctx = asyncio.run(engine._gather_tick_context(_client()))
 

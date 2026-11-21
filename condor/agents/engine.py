@@ -1216,7 +1216,9 @@ class TickEngine:
         if self.config.get("drex_gate"):
             from . import drex_gate  # pandas_ta: loaded only by loops that gate
 
-            answer, gate_text = await self._ask_drex_gate(client, executors_result)
+            answer, gate_text = await self._ask_drex_gate(
+                client, executors_result, risk_state
+            )
             if answer and answer["choice"] == "hold" and not self.is_experiment:
                 line = f"model skipped: {drex_gate.describe(answer)}"
                 with self.journal.batch():
@@ -1245,12 +1247,15 @@ class TickEngine:
             prompt=prompt,
         )
 
-    async def _ask_drex_gate(self, client, executors_result) -> tuple[dict | None, str]:
+    async def _ask_drex_gate(
+        self, client, executors_result, risk_state: RiskState
+    ) -> tuple[dict | None, str]:
         """Drex's answer for this tick, or ``None``, and the text the model gets.
 
         Drex is asked only when the book is exactly what its question describes:
-        no bot, and at most one running executor: a position executor on the
-        loop's connector, pair and side that has filled (traded volume, so not a
+        no bot, no held or closing position, a book the venue check trusts, and
+        at most one running executor: a position executor on the loop's
+        connector, pair and side that has filled (traded volume, so not a
         resting limit order) at a known entry. Anything else, and any failure,
         is left to the model.
         The loop's ``start_when`` / ``stop_when`` text replaces the default rule.
@@ -1263,6 +1268,7 @@ class TickEngine:
         side = str(gate.get("side", "")).upper()
         data = executors_result.data if executors_result else {}
         running = data.get("executors")
+        held = (self._last_skill_data.get("positions") or {}).get("positions")
         want = {"LONG": "BUY", "SHORT": "SELL"}.get(side)
         one_position = (
             want is not None
@@ -1277,6 +1283,12 @@ class TickEngine:
                 and r.get("entry_price")
                 for r in running
             )
+            and held == []
+            and not any(
+                r.get("status") == "SHUTTING_DOWN"
+                for r in data.get("all_executors") or []
+            )
+            and risk_state.book_trusted
             and not data.get("orphaned_executors")
             and not self._adopted_executors
             and not self.ledger.enforced
