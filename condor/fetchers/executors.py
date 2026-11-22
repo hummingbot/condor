@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import math
 import time
 from collections import OrderedDict
 from functools import partial
@@ -441,6 +442,10 @@ def build_executor_row(ex: Dict[str, Any]) -> Dict[str, Any]:
         "volume": get_executor_volume(ex),
         "fees": get_executor_fees(ex),
         "entry_price": entry_price,
+        # A decision needs a confirmed fill, not the display field's limit-price fallback.
+        "filled_entry_price": (
+            _ci_entry if math.isfinite(_ci_entry) and _ci_entry > 0 else 0.0
+        ),
         "current_price": current_price,
         "amount": amount,
         "amount_known": amount_known,

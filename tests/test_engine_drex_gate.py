@@ -14,6 +14,7 @@ import pytest
 
 from condor.agents import drex_gate
 from condor.agents.providers.base import ProviderResult
+from condor.fetchers.executors import build_executor_row
 
 GATE = {
     "connector_name": "binance_perpetual",
@@ -28,6 +29,7 @@ POSITION = {
     "pair": "BTC-USDT",
     "side": "BUY",
     "entry_price": 140.0,
+    "filled_entry_price": 140.0,
     "volume": 100.0,
 }
 
@@ -143,8 +145,12 @@ def test_hold_ends_the_tick_without_the_model(tmp_path, monkeypatch):
     calls = _drex(monkeypatch, "hold", {"hold": 0.9, "start": 0.1})
     engine = _engine(tmp_path, monkeypatch, [], **GATE)
     client = _client()
+    now = [1000.0]
+    monkeypatch.setattr("condor.agents.engine.time.time", lambda: now[0])
+    engine._last_tick_duration = 99.0
 
     async def get_client():
+        now[0] += 2.5
         return client
 
     async def model(*_args):
@@ -154,6 +160,7 @@ def test_hold_ends_the_tick_without_the_model(tmp_path, monkeypatch):
         updates = 0
 
         async def update(self, **_kwargs):
+            assert engine._last_tick_duration == 2.5
             Report.updates += 1
 
     monkeypatch.setattr(engine, "_get_client", get_client)
@@ -172,6 +179,7 @@ def test_hold_ends_the_tick_without_the_model(tmp_path, monkeypatch):
     assert "Last tick: #1" in journal
     assert engine.journal.tick_count == 1
     assert Report.updates == 1
+    assert engine._last_tick_duration == 2.5
 
 
 def test_start_runs_the_model_with_the_answer_in_its_prompt(tmp_path, monkeypatch):
@@ -190,14 +198,28 @@ def test_start_runs_the_model_with_the_answer_in_its_prompt(tmp_path, monkeypatc
 def test_open_position_asks_hold_or_stop_from_its_entry(tmp_path, monkeypatch):
     monkeypatch.setenv("NACE_API_KEY", "nace_sk_test")
     calls = _drex(monkeypatch, "stop", {"stop": 0.8, "hold": 0.2})
-    engine = _engine(tmp_path, monkeypatch, [POSITION], **GATE)
+    position = build_executor_row(
+        {
+            "config": {
+                "type": "position_executor",
+                "connector_name": "binance_perpetual",
+                "trading_pair": "BTC-USDT",
+                "side": "BUY",
+                "entry_price": 140.0,
+            },
+            "filled_amount_quote": 100.0,
+            "custom_info": {"current_position_average_price": 130.0},
+        }
+    )
+    assert position["entry_price"] == 140.0  # Display price is the requested limit.
+    engine = _engine(tmp_path, monkeypatch, [position], **GATE)
 
     ctx = asyncio.run(engine._gather_tick_context(_client()))
 
     question = calls[0]["json"]["questions"]["action"]
     assert set(question["criteria"]) == {"stop", "hold"}
     assert question["criteria"]["stop"] == drex_gate.STOP_WHEN["LONG"]
-    assert calls[0]["json"]["state"]["entry_price"] == 140.0
+    assert calls[0]["json"]["state"]["entry_price"] == 130.0
     assert "Drex (drex-max-finance): STOP" in ctx.prompt
 
 
@@ -223,6 +245,10 @@ def test_the_loop_s_own_rule_is_what_drex_and_the_model_get(tmp_path, monkeypatc
         [{**POSITION, "type": "grid_executor"}],
         [{**POSITION, "volume": 0.0}],
         [{**POSITION, "volume": 0.0, "entry_price": 0.0}],
+        [{**POSITION, "filled_entry_price": None}],
+        [{**POSITION, "filled_entry_price": "nan"}],
+        [{**POSITION, "filled_entry_price": -1}],
+        [{**POSITION, "filled_entry_price": "unknown"}],
         [POSITION] * 2,
         {"error": "backend unreachable"},
         {"executors": [], "all_executors": [{**POSITION, "status": "SHUTTING_DOWN"}]},
@@ -235,6 +261,10 @@ def test_the_loop_s_own_rule_is_what_drex_and_the_model_get(tmp_path, monkeypatc
         "not a position executor",
         "resting limit order",
         "pending market order",
+        "missing fill price",
+        "nonfinite fill price",
+        "negative fill price",
+        "invalid fill price",
         "two positions",
         "no reading",
         "position still closing",

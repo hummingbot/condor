@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -1236,6 +1237,7 @@ class TickEngine:
                     )
                 # Most ticks of a gated loop end here, so the live report
                 # refreshes here too, or it would show the last model turn's book.
+                self._last_tick_duration = time.time() - self._last_tick_at
                 await self._refresh_session_report()
                 return None
             core_data_summaries["drex_gate"] = gate_text
@@ -1270,17 +1272,25 @@ class TickEngine:
         running = data.get("executors")
         held = (self._last_skill_data.get("positions") or {}).get("positions")
         want = {"LONG": "BUY", "SHORT": "SELL"}.get(side)
+        # The row's display entry may be a requested limit, not a fill.
+        # Only the executor's confirmed average can inform an exit decision.
+        entry_price = 0.0
+        if running and len(running) == 1:
+            try:
+                entry_price = float(running[0].get("filled_entry_price") or 0)
+            except (TypeError, ValueError):
+                pass
         one_position = (
             want is not None
             and running is not None
             and len(running) <= 1
+            and (not running or (math.isfinite(entry_price) and entry_price > 0))
             and all(
                 r.get("type") == "position_executor"
                 and r.get("connector") == connector
                 and r.get("pair") == pair
                 and r.get("side") == want
                 and r.get("volume")
-                and r.get("entry_price")
                 for r in running
             )
             and held == []
@@ -1306,7 +1316,7 @@ class TickEngine:
                 trading_pair=pair,
                 interval=gate.get("interval", "1h"),
                 side=side,
-                entry_price=float(running[0]["entry_price"]) if running else 0.0,
+                entry_price=entry_price,
                 start_when=str(gate.get("start_when") or ""),
                 stop_when=str(gate.get("stop_when") or ""),
             )
