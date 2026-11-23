@@ -8,13 +8,17 @@ scheduled routine goes quiet forever while the job keeps firing.
 """
 
 import asyncio
+import re
 from types import SimpleNamespace
 
 import pytest
 from pydantic import BaseModel
 
 import handlers.routines as hr
-from utils.telegram_formatters import escape_markdown_v2_code
+from utils.telegram_formatters import (
+    escape_markdown_v2_code,
+    format_routine_result,
+)
 
 # Backtick (closes the fence), backslash (eats the next char), and a few chars
 # that are reserved outside a fence but literal inside one.
@@ -55,6 +59,17 @@ def render_markdown_v2(text: str) -> str:
                 raise ValueError("Can't parse entities: can't find end of Pre entity")
             out.append(c)
             i += 1
+            continue
+        if c == "[":
+            end = text.find("](", i)
+            close = text.find(")", end + 2) if end != -1 else -1
+            if end == -1 or close == -1:
+                raise ValueError(
+                    f"Can't parse entities: character '[' is reserved "
+                    f"and must be escaped at byte offset {i}"
+                )
+            out.append(re.sub(r"\\(.)", r"\1", text[i + 1 : end]))
+            i = close + 1
             continue
         if c in "*_":
             if stack and stack[-1] == c:
@@ -179,3 +194,57 @@ def test_truncation_happens_before_escaping():
     escaped = escape_markdown_v2_code("\\" * 400)
     assert len(escaped) == 800
     assert render_markdown_v2(f"```\n{escaped}\n```") == "\n" + "\\" * 400 + "\n"
+
+
+def test_bold_only_result_renders_bold_outside_code_block():
+    out = format_routine_result("**Profit: 5%**")
+    assert "```" not in out
+    assert render_markdown_v2(out) == "Profit: 5%"
+
+
+def test_italic_only_result_renders_italic_outside_code_block():
+    out = format_routine_result("*Profit: 5%*")
+    assert "```" not in out
+    assert render_markdown_v2(out) == "Profit: 5%"
+
+
+def test_mixed_emphasis_and_link_renders():
+    out = format_routine_result("**Bold** and *italic* and [link](https://x.example)")
+    assert "```" not in out
+    assert render_markdown_v2(out) == "Bold and italic and link"
+
+
+def test_link_result_renders_clickable_link():
+    out = format_routine_result("[GeckoTerminal](https://www.geckoterminal.com/solana)")
+    assert "```" not in out
+    assert "](https://www.geckoterminal.com/solana)" in out
+    assert render_markdown_v2(out) == "GeckoTerminal"
+
+
+def test_backslashes_survive_in_text_and_emphasis():
+    # A literal backslash must be doubled before the reserved characters are
+    # escaped, or Telegram reads it as an escape and swallows the next char:
+    # `C:\tmp\out.json` would render as `C:tmpout.json`.
+    out = format_routine_result("**Status** C:\\tmp\\out.json")
+    assert "```" not in out
+    assert render_markdown_v2(out) == "Status C:\\tmp\\out.json"
+
+
+def test_link_label_keeps_its_backslashes():
+    out = format_routine_result("[C:\\tmp\\out.json](https://x.example)")
+    assert "```" not in out
+    assert render_markdown_v2(out) == "C:\\tmp\\out.json"
+
+
+def test_link_with_backslash_in_url_is_escaped():
+    # A raw backslash in the destination would escape the closing ")" in
+    # MarkdownV2 and make Telegram reject the whole message.
+    out = format_routine_result("[x](https://x.example/a\\b)")
+    assert "\\\\" in out
+    assert render_markdown_v2(out) == "x"
+
+
+def test_plain_result_keeps_code_block():
+    out = format_routine_result("just text, no markers")
+    assert out.startswith("```")
+    assert render_markdown_v2(out) == "\njust text, no markers\n"
