@@ -311,10 +311,13 @@ def test_an_ordinary_transcription_is_shown_as_spoken(monkeypatch):
 
 
 def test_the_streamed_answer_never_carries_the_phrase(monkeypatch):
+    from utils.telegram_formatters import escape_markdown_v2
+
     out = _run_streamed_answer(monkeypatch, SEED)
     assert out.edited, "the streamer must have written the placeholder"
     final = out.edited[-1]
-    assert "[redacted: mnemonic]" in final
+    # The final answer is MarkdownV2, so the marker arrives escaped.
+    assert escape_markdown_v2("[redacted: mnemonic]") in final
     assert "sausage" not in final
     assert not any("sausage" in text for text in out.edited)
     # The audio really was deleted, which is what the notice claims.
@@ -322,5 +325,7 @@ def test_the_streamed_answer_never_carries_the_phrase(monkeypatch):
 
 
 def test_an_ordinary_transcription_stays_at_the_head_of_the_answer(monkeypatch):
+    from utils.telegram_formatters import escape_markdown_v2
+
     out = _run_streamed_answer(monkeypatch, "how is SOL-USDC doing?")
-    assert "🎙 how is SOL-USDC doing?" in out.edited[-1]
+    assert f"🎙 {escape_markdown_v2('how is SOL-USDC doing?')}" in out.edited[-1]
