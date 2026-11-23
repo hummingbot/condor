@@ -268,6 +268,18 @@ async def show_executors_menu(
 # ============================================
 
 
+HISTORY_FILTER_KEY = "executor_history_filter"
+
+
+def _history_sort_key(executor: Dict[str, Any]) -> float:
+    """Newest first, from whichever timestamp field the API filled in."""
+    for key in ("timestamp", "created_at"):
+        value = executor.get(key)
+        if isinstance(value, (int, float)) and value:
+            return float(value)
+    return 0.0
+
+
 async def show_history(
     update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 0
 ) -> None:
@@ -275,19 +287,27 @@ async def show_history(
     query = update.callback_query
     chat_id = update.effective_chat.id
     per_page = 8
+    lp_only = context.user_data.get(HISTORY_FILTER_KEY, "all") == "lp"
 
     try:
         client, server_name = await get_executors_client(chat_id, context.user_data)
 
         # Fetch non-running executors — the API doesn't have a "not RUNNING" filter,
         # so fetch without status filter and exclude running ones.
-        result = await search_running_executors(client, status=None, limit=100)
+        # LP-only narrows a list where swap legs outnumber LP positions ~4:1, so
+        # widen the window to keep enough LP rows after filtering.
+        result = await search_running_executors(
+            client, status=None, limit=300 if lp_only else 100
+        )
         history = [
             ex for ex in result if str(ex.get("status", "")).upper() != "RUNNING"
         ]
 
+        if lp_only:
+            history = [ex for ex in history if get_executor_type(ex) == "lp"]
+
         # Sort by timestamp descending (most recent first)
-        history.sort(key=lambda ex: ex.get("timestamp") or 0, reverse=True)
+        history.sort(key=_history_sort_key, reverse=True)
 
         # Cache for detail view
         context.user_data["history_executors"] = history
@@ -296,8 +316,10 @@ async def show_history(
         start = page * per_page
         page_items = history[start : start + per_page]
 
+        scope_suffix = " \\| _LP only_" if lp_only else ""
         lines = [
-            f"📜 *Executor History* \\| _{escape_markdown_v2(server_name)}_",
+            f"📜 *Executor History* \\| _{escape_markdown_v2(server_name)}_"
+            f"{scope_suffix}",
         ]
 
         if page_items:
@@ -314,7 +336,9 @@ async def show_history(
                 side_val = normalize_side(config.get("side", SIDE_LONG))
                 leverage = config.get("leverage", 1)
                 side_display = f"{'L' if side_val == SIDE_LONG else 'S'} {leverage}x"
-                type_col = {"grid": "Grid", "position": "Pos"}.get(ex_type, "Ord")
+                type_col = {"grid": "Grid", "position": "Pos", "lp": "LP"}.get(
+                    ex_type, "Ord"
+                )
 
                 pnl = get_executor_pnl(ex)
                 status = str(ex.get("status", "?"))[:6]
@@ -339,7 +363,11 @@ async def show_history(
                 )
         else:
             lines.append("")
-            lines.append("_No executor history found\\._")
+            lines.append(
+                "_No LP executor history found\\._"
+                if lp_only
+                else "_No executor history found\\._"
+            )
 
         # Build keyboard
         keyboard = []
@@ -353,7 +381,7 @@ async def show_history(
                 pair = config.get("trading_pair", "???")[:10]
                 side_val = normalize_side(config.get("side", SIDE_LONG))
                 side_label = "L" if side_val == SIDE_LONG else "S"
-                type_icon = "📐" if ex_type == "grid" else "🎯"
+                type_icon = {"grid": "📐", "lp": "💧"}.get(ex_type, "🎯")
                 pnl = get_executor_pnl(ex)
                 pnl_label = f"+{pnl:.0f}" if pnl >= 0 else f"{pnl:.0f}"
 
@@ -388,6 +416,18 @@ async def show_history(
             if nav_row:
                 keyboard.append(nav_row)
 
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "📋 Show all" if lp_only else "💧 LP only",
+                    callback_data=(
+                        "executors:hist_filter:all"
+                        if lp_only
+                        else "executors:hist_filter:lp"
+                    ),
+                )
+            ]
+        )
         keyboard.append(
             [
                 InlineKeyboardButton("🔄 Refresh", callback_data="executors:history"),
