@@ -1,20 +1,27 @@
 import { useMemo } from "react";
 
 import {
-  feeAmount,
+  lpFees,
+  lpPnl,
   lpStateStyle,
+  lpValue,
   rangeFraction,
   readLpPosition,
   type LpPosition,
 } from "./lp-position";
 import { type ExecutorInfo } from "@/lib/api";
-import { formatPnl, formatPriceSig, isExecutorActive, pnlColor } from "@/lib/formatters";
+import { formatPriceSig, isExecutorActive, pnlColor } from "@/lib/formatters";
 
 interface Props {
   /** The pool's executors, already scoped to this pool by the page. */
   executors: ExecutorInfo[];
   /** Live pool price, when the chart's own mark is fresher than the executor's. */
   currentPrice: number | null;
+  /**
+   * The pool's quote-token USD price, so the range's quote-denominated money
+   * reads in dollars. `null` (an unresolved pool) leaves it in quote units.
+   */
+  quoteUsd?: number | null;
   selectedExecutorId?: string | null;
   onSelect?: (executorId: string) => void;
 }
@@ -33,6 +40,7 @@ interface Props {
 export function LpPositionBar({
   executors,
   currentPrice,
+  quoteUsd = null,
   selectedExecutorId,
   onSelect,
 }: Props) {
@@ -95,16 +103,16 @@ export function LpPositionBar({
               {pos.valueQuote !== null && (
                 <span>
                   <span className="mr-1 text-[10px] text-[var(--color-text-muted)]">value</span>
-                  {feeAmount(pos.valueQuote)}
+                  {lpValue(pos.valueQuote, quoteUsd, pos.quote)}
                 </span>
               )}
               {pos.feesQuote !== null && (
                 <span>
                   <span className="mr-1 text-[10px] text-[var(--color-text-muted)]">fees</span>
-                  {feeAmount(pos.feesQuote)}
+                  {lpFees(pos.feesQuote, quoteUsd, pos.quote)}
                 </span>
               )}
-              <span style={{ color: pnlColor(pos.pnl) }}>{formatPnl(pos.pnl)}</span>
+              <span style={{ color: pnlColor(pos.pnl) }}>{lpPnl(pos.pnl, quoteUsd, pos.quote)}</span>
             </span>
           </button>
         );
