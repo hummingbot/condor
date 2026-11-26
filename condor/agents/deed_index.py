@@ -151,7 +151,7 @@ class DeedIndex:
     #: get ``""`` from :func:`~condor.agents.deeds.attribution_tag`, and only a
     #: deploy claims a bot name, so an executor opened from the dashboard or
     #: from Telegram is written down here and still joins to nothing. The
-    #: browser therefore reads this bucket as *No record found* rather than as
+    #: browser therefore reads this bucket as *Owner unknown* rather than as
     #: an author (READ-365).
     #:
     #: It is the *stamp* and not the oldest deed on disk, because those two

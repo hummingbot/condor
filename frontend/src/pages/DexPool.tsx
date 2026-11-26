@@ -5,9 +5,11 @@ import {
   ChevronLeft,
   ChevronRight,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+
 import { useNavigate, useParams } from "react-router-dom";
 
+import { CHAT_BUBBLE_CLEARANCE } from "@/components/chat/bubbleClearance";
 import { NoServerCard } from "@/components/NoServerCard";
 import { LiquidityDepthColumn } from "@/components/dex/LiquidityDepthColumn";
 import { LpPositionBar } from "@/components/dex/LpPositionBar";
@@ -307,6 +309,13 @@ export function DexPool() {
     });
 
   const active = tab === "lp" ? lpConfig : orderConfig;
+  // Same rule as the Trade page: no errors until the user types or presses
+  // the button, and a tab switch starts quiet again (keyed by tab, no effect).
+  const [errorsFor, setErrorsFor] = useState<Tab | null>(null);
+  const showErrors = errorsFor === tab;
+  const setShowErrors = (on: boolean) => setErrorsFor(on ? tab : null);
+  const shown = <V extends { errors: string[] }>(v: V): V => (showErrors ? v : { ...v, errors: [] });
+  const formScrollRef = useRef<HTMLDivElement>(null);
   const currentPrice = pool?.current_price ?? null;
 
   /**
@@ -707,12 +716,12 @@ export function DexPool() {
             </p>
           )}
 
-          <div className="flex-1 overflow-y-auto">
+          <div ref={formScrollRef} className="flex-1 overflow-y-auto" onInputCapture={() => setShowErrors(true)}>
             {tab === "order" ? (
               <OrderConfigPanel
                 state={orderConfig.state}
                 dispatch={orderConfig.dispatch}
-                validation={orderConfig.validation}
+                validation={shown(orderConfig.validation)}
                 currentPrice={currentPrice}
                 isSpot
                 pair={pairLabel}
@@ -726,7 +735,7 @@ export function DexPool() {
               <LPConfigPanel
                 state={lpConfig.state}
                 dispatch={lpConfig.dispatch}
-                validation={lpConfig.validation}
+                validation={shown(lpConfig.validation)}
                 currentPrice={currentPrice}
                 pair={pairLabel}
                 // No `pool`: the locked branch below never reads it, and the
@@ -747,15 +756,22 @@ export function DexPool() {
             )}
           </div>
 
-          <div className="border-t border-[var(--color-border)] p-3">
-            {!active.validation.valid && (
-              <p className="mb-2 text-[11px] text-[var(--color-red)]">
-                {active.validation.errors[0]}
-              </p>
-            )}
+          <div className={`border-t border-[var(--color-border)] p-3 ${CHAT_BUBBLE_CLEARANCE}`}>
             <button
-              onClick={() => createMutation.mutate()}
-              disabled={!active.validation.valid || createMutation.isPending || !pair}
+              onClick={() => {
+                if (!active.validation.valid) {
+                  setShowErrors(true);
+                  // The messages sit at the foot of the form, which a short
+                  // window may have scrolled out of view (as on Trade).
+                  requestAnimationFrame(() => {
+                    const el = formScrollRef.current;
+                    el?.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+                  });
+                  return;
+                }
+                createMutation.mutate();
+              }}
+              disabled={createMutation.isPending || !pair}
               className="w-full rounded-lg bg-[var(--color-primary-fill)] px-4 py-2 text-xs font-semibold text-[var(--on-primary)] transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
             >
               {createMutation.isPending

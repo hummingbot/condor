@@ -431,7 +431,7 @@ describe("what no agent owns", () => {
 
     // `since: 0` — this install's log has never been complete, so a record it
     // cannot credit is unjudgeable rather than an accusation.
-    expect(text()).toContain("Before the ledger");
+    expect(text()).toContain("Before tracking began");
     expect(controllerRows()).toHaveLength(2);
     expect(counts()).toContain("2 controllers");
   });

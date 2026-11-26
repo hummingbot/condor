@@ -247,7 +247,7 @@ export function DesignSystem() {
           </Card>
           <Card>
             <SectionLabel className="mb-2">Compact page header</SectionLabel>
-            <PageHeader compact eyebrow="Bots" title="All controllers combined" description="2 controllers aggregated" actions={<Button size="sm" variant="primary">Deploy bot</Button>} />
+            <PageHeader compact eyebrow="Bots" title="Your bots" description="2 controllers" actions={<Button size="sm" variant="primary">Deploy bot</Button>} />
           </Card>
         </div>
       </Section>

@@ -18,6 +18,9 @@ import { controllerKey } from "@/lib/controller-identity";
 import { isExecutorActive, toMs } from "@/lib/formatters";
 
 /** Which set of records is in scope: what is live, or what has finished. */
+
+/** The fleet's one row of executors run by no bot (was "Unattached"). */
+export const ORPHANS_LABEL = "Not part of a bot";
 export type Population = "running" | "terminated";
 
 /**
@@ -875,7 +878,7 @@ export function buildTree(
     if (grouping.length === 0) return null;
     let node = orphansOf.get(under.id);
     if (!node) {
-      node = makeNode(under === fleet ? "orphans" : `${under.id}${NEST}orphans`, "orphans", "Unattached");
+      node = makeNode(under === fleet ? "orphans" : `${under.id}${NEST}orphans`, "orphans", ORPHANS_LABEL);
       orphansOf.set(under.id, node);
       under.children.push(node);
     }

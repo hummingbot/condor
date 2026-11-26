@@ -14,6 +14,7 @@ import {
   Settings2,
   TrendingUp,
 } from "lucide-react";
+import { CHAT_BUBBLE_CLEARANCE_FROM_MD } from "@/components/chat/bubbleClearance";
 
 import { NoServerCard } from "@/components/NoServerCard";
 import { useTradingRules } from "@/components/market/useTradingRules";
@@ -82,6 +83,36 @@ const TYPE_LABELS: Record<ExecutorType, string> = {
   order: "Order Executor",
   dca: "DCA Executor",
   lp: "LP Executor",
+};
+
+// One line under the type tabs, so a first-time trader knows what each one is
+// before choosing (UX review: the tabs had no explanation at all).
+const TYPE_HINTS: Record<ExecutorType, string> = {
+  order: "Buy or sell once, at the market or at a price you set.",
+  position: "Open a position that closes itself at your take-profit or stop-loss.",
+  grid: "A ladder of buy and sell orders across a price range.",
+  dca: "Split an entry into several orders at different prices.",
+  lp: "Provide liquidity to a pool within a price range.",
+};
+
+// The success dialog's title, in the same plain words as the button.
+const DONE_LABELS: Record<ExecutorType, string> = {
+  grid: "Grid started",
+  position: "Position opened",
+  order: "Order placed",
+  dca: "DCA started",
+  lp: "Liquidity added",
+};
+
+// What the submit button says. Plain verbs rather than "Create … Executor"
+// (UX review): shorter, so the button stays on one line beside the chat
+// bubble, and it names what happens rather than the machinery behind it.
+const ACTION_LABELS: Record<ExecutorType, string> = {
+  grid: "Start grid",
+  position: "Open position",
+  order: "Place order",
+  dca: "Start DCA",
+  lp: "Add liquidity",
 };
 
 // ── Page ──
@@ -162,8 +193,18 @@ export function CreateExecutor() {
   // there is nothing to come back to, and the alternative is a chart on a pair
   // the reset effect picked. A URL that names a pair *is* a choice, so it skips
   // the list — the effect above has not stripped the param yet on this render.
-  const [browserOpen, setBrowserOpen] = useState(
-    () => !searchParams.get("pair") && !hasRememberedMarket(),
+  //
+  // Reversed by the UX review: the list opening by itself over the chart read
+  // as a popup to dismiss, and a cold start now lands on a venue the account
+  // can trade on (see `coldStartRef`), so there is a sensible market to show.
+  // The list opens when the user asks for it.
+  const [browserOpen, setBrowserOpen] = useState(false);
+  // Captured on the first render, before the effect below writes the current
+  // market back to storage and makes every visit look like a returning one.
+  // A URL naming a venue or a pair is a choice, so it is never a cold start:
+  // switching venue under a linked pair would drop the pair it asked for.
+  const coldStartRef = useRef(
+    !searchParams.get("connector") && !searchParams.get("pair") && !hasRememberedMarket(),
   );
   const [rightPanelWidth, setRightPanelWidth] = useState(288);
   const [bottomPaneHeight, setBottomPaneHeight] = useState(200);
@@ -294,6 +335,19 @@ export function CreateExecutor() {
     }
   }, [listsReady, allConnectors, connector]);
 
+  // A first visit should not open on a venue the account has no keys for (the
+  // form would sit behind "View only"). `allConnectors` lists credentialed
+  // venues first, so its head is a tradable one whenever any exists. Runs once:
+  // after that the user's own choice, view-only or not, is what is remembered.
+  useEffect(() => {
+    if (!listsReady || !coldStartRef.current) return;
+    coldStartRef.current = false;
+    const first = allConnectors[0];
+    if (first && credentialedConnectors?.has(first) && !credentialedConnectors.has(connector)) {
+      gridDispatch({ type: "SET_CONNECTOR", value: first });
+    }
+  }, [listsReady, allConnectors, credentialedConnectors, connector, gridDispatch]);
+
   // Executor types the venue does not support cannot stay selected (Grid on a CEX
   // → pick a DEX → land on Order).
   useEffect(() => {
@@ -421,6 +475,18 @@ export function CreateExecutor() {
       case "lp": return lpConfig.validation;
     }
   }, [executorType, gridConfig.validation, positionConfig.validation, orderConfig.validation, dcaConfig.validation, lpConfig.validation]);
+
+  // Errors wait until the user has typed into the form or pressed Create: a
+  // form that opens already red ("Amount required") reads as broken before
+  // anything has been entered. A new form type or market starts quiet again.
+  // Keyed by the form it was earned on, like `selection` above, so switching
+  // type or market drops it without an effect.
+  const formKey = `${executorType}:${connector}:${pair}`;
+  const [errorsFor, setErrorsFor] = useState<string | null>(null);
+  const showErrors = errorsFor === formKey;
+  const setShowErrors = (on: boolean) => setErrorsFor(on ? formKey : null);
+  const configScrollRef = useRef<HTMLDivElement>(null);
+  const shown = <V extends { errors: string[] }>(v: V): V => (showErrors ? v : { ...v, errors: [] });
 
   // What the form currently says, for the chat bubble (FEAT-060/FEAT-072).
   //
@@ -609,9 +675,12 @@ export function CreateExecutor() {
   }
 
   return (
-    <div className="-m-6 flex h-[calc(100%+3rem)] flex-col">
+    // Below md the page stacks — chart, then the form, then the tables — and
+    // grows with its content so the shell scrolls it (UX review, phone layout).
+    // Side by side, each pane would be a sliver at 390px wide.
+    <div className="-m-6 flex flex-col md:h-[calc(100%+3rem)]">
       {/* Top Bar */}
-      <div className="flex items-center border-b border-[var(--color-border)] bg-[var(--color-surface)]">
+      <div className="flex flex-wrap items-center border-b border-[var(--color-border)] bg-[var(--color-surface)] md:flex-nowrap">
         {/* Back button */}
         <button
           onClick={() => navigate(-1)}
@@ -685,7 +754,7 @@ export function CreateExecutor() {
         </div>
 
         {/* Price ticker */}
-        <div className="flex flex-1 items-center px-4 py-2">
+        <div className="flex min-w-0 basis-full items-center overflow-x-auto border-t border-[var(--color-border)] px-4 py-2 md:flex-1 md:basis-auto md:border-t-0">
           <PriceTicker
             server={server}
             connector={connector}
@@ -696,7 +765,7 @@ export function CreateExecutor() {
         </div>
 
         {/* Interval + Range */}
-        <div className="flex items-center gap-3 border-l border-[var(--color-border)] px-4 py-2">
+        <div className="flex w-full flex-wrap items-center gap-3 border-t border-[var(--color-border)] px-4 py-2 md:w-auto md:flex-nowrap md:border-l md:border-t-0">
           <div className="flex overflow-hidden rounded-md border border-[var(--color-border)]">
             {INTERVALS.map((iv, i) => (
               <button
@@ -748,9 +817,10 @@ export function CreateExecutor() {
       )}
 
       {/* Main Area: Chart + Right Panel */}
-      <div className="flex min-h-0 flex-1">
-        {/* Chart + Bottom Pane */}
-        <div className="relative min-w-0 flex-1 flex flex-col">
+      <div className="flex min-h-0 flex-1 flex-col md:flex-row">
+        {/* Chart + Bottom Pane. On a phone this column dissolves (`contents`)
+            so its chart and tables can sit either side of the form. */}
+        <div className="contents md:relative md:flex md:min-w-0 md:flex-1 md:flex-col">
           {browserOpen && caps.hasOrderBook && (
             <MarketBrowser
               server={server}
@@ -762,7 +832,7 @@ export function CreateExecutor() {
               onClose={() => setBrowserOpen(false)}
             />
           )}
-          <div className="flex-1 min-h-0 overflow-hidden bg-[var(--color-surface)]">
+          <div className="order-1 h-[45vh] min-h-64 shrink-0 overflow-hidden bg-[var(--color-surface)] md:order-none md:h-auto md:min-h-0 md:flex-1">
             <TradeChart
               key={`${connector}:${pair}:${chartInterval}`}
               server={server}
@@ -790,12 +860,15 @@ export function CreateExecutor() {
           </div>
           {/* Horizontal resize handle */}
           <div
-            className="group/hdrag relative h-1.5 shrink-0 cursor-row-resize border-y border-[var(--color-border)] bg-[var(--color-bg)] hover:bg-[var(--color-primary-fill)]/10 active:bg-[var(--color-primary-fill)]/20 transition-colors"
+            className="group/hdrag relative hidden h-1.5 shrink-0 cursor-row-resize md:block border-y border-[var(--color-border)] bg-[var(--color-bg)] hover:bg-[var(--color-primary-fill)]/10 active:bg-[var(--color-primary-fill)]/20 transition-colors"
             onMouseDown={startVDrag}
           >
             <div className="absolute inset-x-0 top-1/2 mx-auto h-px w-12 -translate-y-1/2 rounded bg-amber-400/60 group-hover/hdrag:bg-amber-400 transition-colors" />
           </div>
-          <div style={{ height: bottomPaneHeight }} className="shrink-0 overflow-hidden">
+          <div
+            style={{ "--pane-h": `${bottomPaneHeight}px` } as React.CSSProperties}
+            className="order-3 h-[28rem] shrink-0 overflow-hidden md:order-none md:h-[var(--pane-h)]"
+          >
             <TradeBottomPane
               executors={mainExecutors}
               positions={mainPositions}
@@ -824,14 +897,17 @@ export function CreateExecutor() {
 
         {/* Vertical resize handle */}
         <div
-          className="group/vdrag relative w-1.5 shrink-0 cursor-col-resize border-x border-[var(--color-border)] bg-[var(--color-bg)] hover:bg-[var(--color-primary-fill)]/10 active:bg-[var(--color-primary-fill)]/20 transition-colors"
+          className="group/vdrag relative hidden w-1.5 shrink-0 cursor-col-resize md:block border-x border-[var(--color-border)] bg-[var(--color-bg)] hover:bg-[var(--color-primary-fill)]/10 active:bg-[var(--color-primary-fill)]/20 transition-colors"
           onMouseDown={startHDrag}
         >
           <div className="absolute inset-y-0 left-1/2 my-auto h-12 w-px -translate-x-1/2 rounded bg-amber-400/60 group-hover/vdrag:bg-amber-400 transition-colors" />
         </div>
 
         {/* Right Panel */}
-        <div className="flex shrink-0 flex-col bg-[var(--color-surface)]" style={{ width: rightPanelWidth }}>
+        <div
+          style={{ "--panel-w": `${rightPanelWidth}px` } as React.CSSProperties}
+          className="order-2 flex min-h-[32rem] w-full shrink-0 flex-col border-y border-[var(--color-border)] bg-[var(--color-surface)] md:order-none md:min-h-0 md:w-[var(--panel-w)] md:border-y-0"
+        >
           {/* Panel Mode Toggle */}
           <div className="flex border-b border-[var(--color-border)]">
             <button
@@ -880,6 +956,9 @@ export function CreateExecutor() {
                     </button>
                   ))}
                 </div>
+                <p className="px-3 pb-2 pt-1.5 text-[11px] leading-snug text-[var(--color-text-muted)]">
+                  {TYPE_HINTS[executorType]}
+                </p>
               </div>
 
               {/* Everything the venue's credentials gate — the config form and
@@ -889,34 +968,43 @@ export function CreateExecutor() {
                   is untouched, and the panel keeps its scroll/footer split. */}
               <div className="relative flex min-h-0 flex-1 flex-col">
                 {/* Config Panel */}
-                <div className="flex-1 overflow-y-auto">
+                <div ref={configScrollRef} className="flex-1 overflow-y-auto" onInputCapture={() => setShowErrors(true)}>
                   {executorType === "grid" && (
-                    <GridConfigPanel state={gridState} dispatch={gridDispatch} currentPrice={currentPrice} isSpot={isSpot} quoteCurrency={pair?.split("-")[1] || "USDT"} />
+                    <GridConfigPanel state={gridState} dispatch={gridDispatch} currentPrice={currentPrice} isSpot={isSpot} quoteCurrency={pair?.split("-")[1] || "USDT"} showErrors={showErrors} />
                   )}
                   {executorType === "position" && (
-                    <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} validation={positionConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
+                    <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} validation={shown(positionConfig.validation)} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
                   )}
                   {executorType === "order" && (
-                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} strategies={caps.orderStrategies} baseAvailable={balances.base} quoteAvailable={balances.quote} />
+                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={shown(orderConfig.validation)} currentPrice={currentPrice} isSpot={isSpot} pair={pair} strategies={caps.orderStrategies} baseAvailable={balances.base} quoteAvailable={balances.quote} />
                   )}
                   {executorType === "dca" && (
-                    <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} validation={dcaConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
+                    <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} validation={shown(dcaConfig.validation)} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
                   )}
                   {executorType === "lp" && (
-                    <LPConfigPanel state={lpConfig.state} dispatch={lpConfig.dispatch} validation={lpConfig.validation} currentPrice={currentPrice} pair={pair} pool={lpConfig.pool} poolFetching={lpConfig.poolFetching} baseAvailable={balances.base} quoteAvailable={balances.quote} />
+                    <LPConfigPanel state={lpConfig.state} dispatch={lpConfig.dispatch} validation={shown(lpConfig.validation)} currentPrice={currentPrice} pair={pair} pool={lpConfig.pool} poolFetching={lpConfig.poolFetching} baseAvailable={balances.base} quoteAvailable={balances.quote} />
                   )}
                 </div>
 
                 {/* Sticky Create Footer */}
-                <div className="border-t border-[var(--color-border)] p-3">
-                  {!activeValidation.valid && (
-                    <p className="mb-2 text-[11px] text-[var(--color-red)]">
-                      {activeValidation.errors[0]}
-                    </p>
-                  )}
+                <div className={`border-t border-[var(--color-border)] p-3 ${CHAT_BUBBLE_CLEARANCE_FROM_MD}`}>
                   <button
-                    onClick={() => createMutation.mutate()}
-                    disabled={!caps.canTrade || !activeValidation.valid || createMutation.isPending}
+                    onClick={() => {
+                      // Left enabled while invalid so a click can say why
+                      // instead of greying out with no reason given.
+                      if (!activeValidation.valid) {
+                        setShowErrors(true);
+                        // The messages sit at the foot of the form, which may be
+                        // scrolled out of view in a short panel.
+                        requestAnimationFrame(() => {
+                          const el = configScrollRef.current;
+                          el?.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+                        });
+                        return;
+                      }
+                      createMutation.mutate();
+                    }}
+                    disabled={!caps.canTrade || createMutation.isPending}
                     className="flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--color-primary-fill)] px-4 py-2.5 text-sm font-bold text-[var(--on-primary)] transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {createMutation.isPending ? (
@@ -924,7 +1012,7 @@ export function CreateExecutor() {
                     ) : (
                       <Rocket className="h-4 w-4" />
                     )}
-                    Create {TYPE_LABELS[executorType]}
+                    {ACTION_LABELS[executorType]}
                   </button>
                 </div>
 
@@ -941,7 +1029,7 @@ export function CreateExecutor() {
       {successInfo && (
         <ExecutorSuccessModal
           executorId={successInfo.id}
-          title={`${TYPE_LABELS[successInfo.type]} Created`}
+          title={DONE_LABELS[successInfo.type]}
           subtitle={`Successfully deployed on ${successInfo.connector}`}
           details={
             <>

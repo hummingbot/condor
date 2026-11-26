@@ -1,6 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { Bug, Moon, Sun } from "lucide-react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 
 import { ChatBubble } from "@/components/chat/ChatBubble";
@@ -13,10 +12,10 @@ import { ChatProvider } from "@/hooks/useChat";
 import { useCredentials } from "@/hooks/useCredentials";
 import { usePrefetchData } from "@/hooks/usePrefetchData";
 import { useServer } from "@/hooks/useServer";
-import { useTheme } from "@/hooks/useTheme";
 import { NAV_ITEMS, FULL_BLEED_ROUTES } from "@/lib/nav";
 import { routeFacts } from "@/lib/pageFacts";
 import { useViewFacts } from "@/lib/viewFacts";
+import { AccountMenu } from "./AccountMenu";
 import { CurrencySelector } from "./CurrencySelector";
 import { NotificationBell } from "./NotificationBell";
 import { GatewayIndicator } from "./GatewayIndicator";
@@ -56,7 +55,6 @@ function AppShellBody() {
   const { pathname, search } = useLocation();
   // The Hub and an agent's workspace are Agents' pages (see the nav below).
   const inAgentsSection = pathname === "/hub" || pathname.startsWith("/agents/");
-  const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
   const { hasKeys, isLoading: keysLoading, isError: keysError } = useCredentials();
   const [reportOpen, setReportOpen] = useState(false);
@@ -166,24 +164,7 @@ function AppShellBody() {
                 update without a reload wherever the user is (FEAT-048). */}
             <NotificationBell />
 
-            <button
-              onClick={() => setReportOpen(true)}
-              className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-accent)]"
-              title="Report an issue"
-            >
-              <Bug className="h-4 w-4" />
-            </button>
-
-            <button
-              onClick={toggleTheme}
-              className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-accent)]"
-              title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-              aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-            >
-              {/* Light/dark only — the colour-blind palette lives in
-                  Settings → Appearance, so this never reads as a third theme. */}
-              {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-            </button>
+            <AccountMenu onReportIssue={() => setReportOpen(true)} />
 
           </div>
         </div>

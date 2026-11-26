@@ -125,18 +125,18 @@ describe("the agent scope header's name", () => {
   it("names the bucket that found no record, instead of showing its sentinel", async () => {
     await render(OUTSIDE);
 
-    expect(name()).toBe("No record found");
+    expect(name()).toBe("Owner unknown");
     // The sentinel is a leading space, so a blank title is exactly how the bug
     // looked: the tooltip fell back to the raw key too.
-    expect(heading().querySelector("span")!.title).toBe("No record found");
+    expect(heading().querySelector("span")!.title).toBe("Owner unknown");
     expect(container.textContent).not.toContain(OUTSIDE);
   });
 
   it("names the bucket from before the ledger, the sibling that goes the same way", async () => {
     await render(BEFORE_LEDGER);
 
-    expect(name()).toBe("Before the ledger");
-    expect(heading().querySelector("span")!.title).toBe("Before the ledger");
+    expect(name()).toBe("Before tracking began");
+    expect(heading().querySelector("span")!.title).toBe("Before tracking began");
     expect(container.textContent).not.toContain(BEFORE_LEDGER);
   });
 

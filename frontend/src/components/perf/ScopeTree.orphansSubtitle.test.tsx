@@ -1,5 +1,5 @@
 /**
- * What the "Unattached" row says it is holding.
+ * What the "Not part of a bot" row says it is holding.
  *
  * The row used to read "1 controller left no record", which is a history the
  * record cannot support: the ids it buckets by are not controllers. `main` is
@@ -112,13 +112,13 @@ afterEach(() => {
 describe("the Unattached row's subtitle", () => {
   it("counts the executors it gathers, not controllers", () => {
     draw(treeOf([looseExecutor("exec-a", "main"), looseExecutor("exec-b", "main")]));
-    expect(subtitleOf("Unattached")).toBe("2 executors · under no controller");
+    expect(subtitleOf("Not part of a bot")).toBe("2 executors · not run by a bot");
   });
 
   it("claims no controller behind a single position opened by hand", () => {
     draw(treeOf([looseExecutor("exec-a", "main")]));
-    const subtitle = subtitleOf("Unattached");
-    expect(subtitle).toBe("1 executor · under no controller");
+    const subtitle = subtitleOf("Not part of a bot");
+    expect(subtitle).toBe("1 executor · not run by a bot");
     // The whole of the defect: a row standing for one hand-opened position
     // asserting that a controller existed and then lost its record.
     expect(subtitle).not.toMatch(/controllers? left no record/);
@@ -138,7 +138,7 @@ describe("the Unattached row's subtitle", () => {
         looseExecutor("exec-c", "pmm_1"),
       ]),
     );
-    expect(subtitleOf("Unattached")).toBe("3 executors · under no controller");
+    expect(subtitleOf("Not part of a bot")).toBe("3 executors · not run by a bot");
     // The ids themselves are untouched: each is still a row, still named by
     // the one name its executors carry, still counted in executors.
     expect(subtitleOf("main")).toBe("1 executor");

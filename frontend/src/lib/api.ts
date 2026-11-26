@@ -2304,6 +2304,8 @@ export interface RoutineFieldInfo {
   description: string;
   widget?: "select";
   options_from?: string;
+  /** A fixed set of values (a `Literal` or a `choices` hint): drawn as a segmented control. */
+  choices?: (string | number)[];
 }
 
 export interface RoutineInfo {

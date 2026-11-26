@@ -50,6 +50,7 @@ class Config(BaseModel):
     mode: str = Field(
         default="list",
         description="list = every archived DB with health | summary = metrics per healthy DB | detail = one DB in depth",
+        json_schema_extra={"choices": list(MODES)},
     )
     db_filter: str = Field(
         default="", description="Only databases whose path contains this text"

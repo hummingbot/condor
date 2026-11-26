@@ -180,7 +180,7 @@ describe("the agent rows", () => {
     });
     const labels = rows.filter((r) => r.kind === "agent").map((r) => r.label);
 
-    expect(labels).toEqual(["No record found", "Before the ledger"]);
+    expect(labels).toEqual(["Owner unknown", "Before tracking began"]);
   });
 });
 
