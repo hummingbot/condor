@@ -14,7 +14,7 @@ import {
   Settings2,
   TrendingUp,
 } from "lucide-react";
-import { CHAT_BUBBLE_CLEARANCE } from "@/components/chat/bubbleClearance";
+import { CHAT_BUBBLE_CLEARANCE_FROM_MD } from "@/components/chat/bubbleClearance";
 
 import { NoServerCard } from "@/components/NoServerCard";
 import { useTradingRules } from "@/components/market/useTradingRules";
@@ -979,7 +979,7 @@ export function CreateExecutor() {
                 </div>
 
                 {/* Sticky Create Footer */}
-                <div className={`border-t border-[var(--color-border)] p-3 ${CHAT_BUBBLE_CLEARANCE}`}>
+                <div className={`border-t border-[var(--color-border)] p-3 ${CHAT_BUBBLE_CLEARANCE_FROM_MD}`}>
                   <button
                     onClick={() => {
                       // Left enabled while invalid so a click can say why
