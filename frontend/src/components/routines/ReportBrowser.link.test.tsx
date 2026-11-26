@@ -16,7 +16,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ServerContext } from "@/hooks/useServer";
-import type { RoutineInfo } from "@/lib/api";
+import type { RoutineInfo, RoutineInstance } from "@/lib/api";
 
 vi.mock("@/lib/api", () => ({
   api: {
@@ -70,17 +70,45 @@ function routine(name: string): RoutineInfo {
   } as RoutineInfo;
 }
 
+/** A finished run of `name` that handed back text, as the instance list lists it. */
+function run(id: string, name: string): RoutineInstance {
+  return {
+    instance_id: id,
+    routine_name: name,
+    config: {},
+    status: "completed",
+    source: "routine",
+    created_at: 1,
+    last_run_at: 1,
+    last_result: "done",
+    last_duration: 1,
+    run_count: 1,
+  } as RoutineInstance;
+}
+
 let container: HTMLDivElement;
 let root: Root;
 let qc: QueryClient;
 
-/** The page as `/routines` mounts it, with `?routine=` as `initialSource`. */
-async function show(initialSource?: string) {
+/**
+ * The page as `/routines` mounts it: `?routine=` as `initialSource`, and
+ * `?run=` / `?report=` as `link.run` / `link.report`.
+ */
+async function show(
+  initialSource?: string,
+  link: { run?: string; report?: string; instances?: RoutineInstance[] } = {},
+) {
   await act(async () => {
     root.render(
       <QueryClientProvider client={qc}>
         <ServerContext.Provider value={{ server: "s", setServer: () => {} }}>
-          <ReportBrowser page instances={[]} initialSource={initialSource} />
+          <ReportBrowser
+            page
+            instances={link.instances ?? []}
+            initialSource={initialSource}
+            initialInstanceId={link.run}
+            initialReportId={link.report}
+          />
         </ServerContext.Provider>
       </QueryClientProvider>,
     );
@@ -98,6 +126,15 @@ const reportColumn = () =>
   [...container.querySelectorAll("div")].find((d) =>
     d.className.startsWith("min-w-0 flex-1 flex-col"),
   )!;
+/** Which of the Report / Output toggles is on. */
+const shownView = () =>
+  [...container.querySelectorAll("button")]
+    .find(
+      (b) =>
+        ["report", "output"].includes(b.textContent?.trim() ?? "") &&
+        b.className.includes("color-primary-fill"),
+    )
+    ?.textContent?.trim();
 const reportHiddenOnPhone = () => reportColumn().className.split(" ").includes("hidden");
 
 beforeEach(() => {
@@ -142,5 +179,20 @@ describe("a ?routine= link on a mounted /routines page", () => {
     // The same link again, as any re-render of the route passes it.
     await show("alpha_check");
     expect(heading()).toContain("beta");
+  });
+
+  it("opens a run named without a report on that run's output", async () => {
+    const instances = [run("i7", "beta_check")];
+    await show("alpha_check", { instances });
+    await show("beta_check", { run: "i7", instances });
+    expect(heading()).toContain("beta");
+    expect(shownView()).toBe("output");
+  });
+
+  it("opens the report a link names, even with its run", async () => {
+    const instances = [run("i7", "beta_check")];
+    await show("alpha_check", { instances });
+    await show("beta_check", { run: "i7", report: "r1", instances });
+    expect(shownView()).toBe("report");
   });
 });

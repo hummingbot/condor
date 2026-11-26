@@ -168,15 +168,17 @@ export function ReportBrowser({
   // A link that names another routine while this one is already mounted —
   // `/routines?routine=` followed from the page itself, which keeps this
   // component rather than remounting it — opens that routine, as a tap in the
-  // list would. Seeded once above, the pick used to ignore it at every width,
-  // and on a phone the list stayed up with no sign the link had been followed.
+  // list would, on the same view a fresh mount picks for it (a run named
+  // without a report opens on that run's output). Seeded once above, the pick
+  // used to ignore it at every width, and on a phone the list stayed up with
+  // no sign the link had been followed.
   // Adjusted during render rather than in an effect, so no stale frame shows.
   const [linkedSource, setLinkedSource] = useState(initialSource);
   if (initialSource !== linkedSource) {
     setLinkedSource(initialSource);
     if (initialSource) {
       setActiveSource(initialSource);
-      setView("report");
+      setView(initialInstanceId && !initialReportId ? "output" : "report");
       setPhonePane("report");
     }
   }
