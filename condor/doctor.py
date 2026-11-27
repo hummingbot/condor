@@ -233,19 +233,36 @@ def _check_admin_can_administer(data: dict | None) -> list[Check]:
             )
 
     users = data.get("users") or {}
-    role = ""
-    for key, record in users.items():
-        if str(key) == admin_id and isinstance(record, dict):
-            role = str(record.get("role") or "")
+    present = False
+    record = None
+    for key, candidate in users.items():
+        if str(key) == admin_id:
+            present, record = True, candidate
             break
 
+    # No key at all is not a mismatch: ConfigManager seeds ADMIN_USER_ID as
+    # an admin every time it loads (``_ensure_admin_user``), so the first start
+    # -- or this very doctor run, whose Hummingbot API check constructs one --
+    # writes it. A fresh install's template ships ``users: {}``, so reporting
+    # it failed every first `make install` on a file doctor itself then fixed.
+    # A key that *is* present is never replaced by that seeding (it checks only
+    # for the key), so anything wrong with its value survives a restart.
+    if not present:
+        return duplicates
+
+    role = str(record.get("role") or "") if isinstance(record, dict) else ""
     if role.lower() == "admin":
         return duplicates
 
-    if not role:
+    if not isinstance(record, dict):
         detail = (
-            f"config.yml has no user {admin_id}, so the dashboard logs in as an "
-            "id with no role at all and every admin route answers 403."
+            f"config.yml has an entry for user {admin_id} that is not a user "
+            f"record ({record!r}), so every admin route answers 403."
+        )
+    elif not role:
+        detail = (
+            f"config.yml has user {admin_id} with no role, so every admin "
+            "route answers 403."
         )
     else:
         detail = (

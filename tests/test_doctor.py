@@ -691,12 +691,44 @@ def test_an_id_config_yml_calls_a_user_is_reported(tmp_path, monkeypatch):
     assert "role: admin" in detail, "the remedy has to name the knob"
 
 
-def test_an_id_config_yml_has_never_heard_of_is_reported(tmp_path, monkeypatch):
-    checks = _admin_checks(
-        tmp_path, monkeypatch, admin_id=999, users={1: {"role": "admin"}}
+def test_an_id_config_yml_has_never_heard_of_is_not_a_failure(tmp_path, monkeypatch):
+    """ConfigManager seeds ADMIN_USER_ID as an admin on every load, so a missing
+    record heals on first start. A fresh install's template ships `users: {}`,
+    and reporting that failed every first `make install`."""
+    assert (
+        _admin_checks(tmp_path, monkeypatch, admin_id=999, users={1: {"role": "admin"}})
+        == []
     )
+    assert _admin_checks(tmp_path, monkeypatch, admin_id=999, users={}) == []
+
+
+def test_a_record_with_no_role_is_reported(tmp_path, monkeypatch):
+    checks = _admin_checks(tmp_path, monkeypatch, admin_id=999, users={999: {}})
     assert [c.name for c in checks] == ["Admin access"]
-    assert "no user 999" in checks[0].detail
+    assert "999" in checks[0].detail and "no role" in checks[0].detail
+
+
+def test_a_present_but_invalid_entry_is_reported(tmp_path, monkeypatch):
+    """ConfigManager's seeding checks only for the key, so a null (or otherwise
+    non-dict) entry is never repaired on restart and must not pass as missing."""
+    for value in (None, "admin"):
+        checks = _admin_checks(tmp_path, monkeypatch, admin_id=999, users={999: value})
+        assert [c.name for c in checks] == ["Admin access"]
+        assert "999" in checks[0].detail and "not a user record" in checks[0].detail
+
+
+def test_the_seeded_record_satisfies_the_check(tmp_path, monkeypatch):
+    """What ConfigManager writes for a missing admin is what this check accepts."""
+    import config_manager
+
+    cm = object.__new__(config_manager.ConfigManager)
+    cm._data = {"users": {}}
+    cm._save_config = lambda: None
+    cm._ensure_admin_user(999)
+    assert (
+        _admin_checks(tmp_path, monkeypatch, admin_id=999, users=cm._data["users"])
+        == []
+    )
 
 
 def test_a_duplicated_assignment_is_named_on_its_own(tmp_path, monkeypatch):
