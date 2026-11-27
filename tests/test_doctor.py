@@ -708,6 +708,15 @@ def test_a_record_with_no_role_is_reported(tmp_path, monkeypatch):
     assert "999" in checks[0].detail and "no role" in checks[0].detail
 
 
+def test_a_present_but_invalid_entry_is_reported(tmp_path, monkeypatch):
+    """ConfigManager's seeding checks only for the key, so a null (or otherwise
+    non-dict) entry is never repaired on restart and must not pass as missing."""
+    for value in (None, "admin"):
+        checks = _admin_checks(tmp_path, monkeypatch, admin_id=999, users={999: value})
+        assert [c.name for c in checks] == ["Admin access"]
+        assert "999" in checks[0].detail and "not a user record" in checks[0].detail
+
+
 def test_the_seeded_record_satisfies_the_check(tmp_path, monkeypatch):
     """What ConfigManager writes for a missing admin is what this check accepts."""
     import config_manager
